@@ -36,9 +36,13 @@ def process_folder(folder_path):
         executor.map(convert_image, image_files, [folder_path]*len(image_files))
 
 def convert_image(img_path, base_folder):
-    ARNOLD_PATH = r"D:/ConfigurationSync/inPipeline/software/windows/maya_addons/2024/mtoa/5.3.2.0/bin/maketx.exe"
-    COLOR_CONFIG = r"D:/ConfigurationSync/ColorManagement/ocio/aces_1.0.3/config.ocio"
+    ARNOLD_PATH = os.environ.get("MAKETX_PATH", "maketx")  # Default to "maketx" if not set
+    COLOR_CONFIG = os.environ.get("OCIO", "")
     OUTPUT_COLOR_SPACE = "ACES - ACEScg"
+    
+    if not COLOR_CONFIG:
+        cmds.warning("OCIO configuration path is not set in the environment variables.")
+        return
     
     filename = os.path.basename(img_path)
     base_name, ext = os.path.splitext(filename)
@@ -84,6 +88,7 @@ def convert_image(img_path, base_folder):
     except subprocess.CalledProcessError as e:
         print(f"Failed to convert {filename}: {e}\nCommand: {' '.join(command)}")
         print(f"Error Output: {e.stderr}")
+
 def determine_color_space(filename, extension):
     patterns = {
         '_depth|_disp|_normal|_mask|_glossiness|_gloss|_opacity|_translucency|_height|_rough|_roughness|_metal|_displacement|_nrm': ('raw', '-d float', filename.replace(extension, '_raw' + extension)),
