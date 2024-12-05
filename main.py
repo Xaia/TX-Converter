@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def create_ui():
-    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field
+    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox
 
     if cmds.window("txConverter", exists=True):
         cmds.deleteUI("txConverter")
@@ -21,17 +21,21 @@ def create_ui():
     cmds.button(label="Choose Folder", command=lambda _: cmds.textField(folder_path_field, edit=True, text=cmds.fileDialog2(fileMode=3)[0]))
     cmds.button(label="Load Textures", command=lambda _: load_textures(cmds.textField(folder_path_field, query=True, text=True)))
 
-    # Texture Type Checkboxes (added dynamically only if .tif is found)
+    # Texture Type Checkboxes
     cmds.text(label="Select texture type:")
     srgb_checkbox = None
     lin_srgb_checkbox = None
     raw_checkbox = None
+
+    # Compression Flag Checkbox
+    compression_checkbox = cmds.checkBox(label="Use DWA Compression", value=True)
 
     # Output Text Area
     texture_output_field = cmds.scrollField(editable=False, wordWrap=True, height=200)
 
     cmds.button(label="Process Textures", command=lambda _: process_selected_textures())
     cmds.showWindow(window)
+
 
 
 def load_textures(folder_path):
@@ -71,8 +75,12 @@ def determine_color_space(filename, extension):
     """
     Determine the color space of a texture based on its filename patterns and extension.
     """
-    # RAW textures (non-color data)
-    if re.search(r'_depth|_disp|_normal|_mask|_rough|_metal|_gloss|_spec|_ao|_cavity|_bump|_displacement|_nrm', filename, re.IGNORECASE):
+    # Extended RAW textures (non-color data)
+    if re.search(
+        r'_depth|_disp|_normal|_mask|_rough|_metal|_gloss|_spec|_ao|_cavity|_bump|_displacement|_nrm|_height|_zdisp|_norm|_n|_opacity|_roughness|_r|_roughnes|_specularity|_specs|_b|_metalness|_metalnes',
+        filename,
+        re.IGNORECASE
+    ):
         return 'raw', '-d float', filename.replace(extension, '_raw' + extension)
 
     # Color textures (albedo, diffuse, etc.)
@@ -83,7 +91,7 @@ def determine_color_space(filename, extension):
             return 'lin_srgb', '', filename.replace(extension, '_lin_srgb' + extension)
 
     # Ignore non-image files
-    if extension.lower() not in ['.jpg', '.png', '.jpeg', '.bmp', '.gif', '.tif', '.exr']:
+    if extension.lower() not in ['.jpg', '.png', '.jpeg', '.bmp', '.gif', '.tif', '.tiff', '.exr']:
         print(f"Skipped non-image file: {filename}")
         return 'unknown', '', filename
 
@@ -97,6 +105,7 @@ def determine_color_space(filename, extension):
 
     # Unknown textures
     return 'unknown', '', filename
+
 
 
 
@@ -182,7 +191,7 @@ def convert_texture_to_tx(texture, color_space, additional_options):
     ext = os.path.splitext(texture)[1].lower()[1:]  # Get extension without the dot (e.g., 'jpg')
 
     # Naming logic for .tx files
-    duplicate_files = [file for file in os.listdir(output_folder) if base_name in file and file.endswith(('.exr', '.jpg', '.png', '.tif', '.tiff'))]
+    duplicate_files = [file for file in os.listdir(output_folder) if base_name in file and file.endswith(('.exr', '.jpg', '.png', '.tif', '.tiff', '.bmp', '.gif'))]
     if len(duplicate_files) > 1 and ext != 'exr':  # Add suffix for non-EXR files when duplicates exist
         tx_name = f"{base_name}_{ext}.tx"
     else:  # EXR files or non-duplicates keep original base name
@@ -194,15 +203,39 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         cmds.warning("maketx path not set or invalid. Please check your environment variables.")
         return
 
-    # Construct maketx command
-    if color_space == 'raw':
-        command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', '--oiio', texture]
+    # Determine if this is a displacement file
+    is_displacement = re.search(r'_disp|_displacement|_zdisp', texture, re.IGNORECASE)
+
+    # Determine bit-depth based on file type and displacement status
+    if is_displacement:
+        bit_depth = 'float'  # Force 32-bit for displacement files
+    elif ext in ['jpg', 'jpeg', 'gif', 'bmp']:
+        bit_depth = 'uint8'  # Force 8-bit for these formats
+    elif ext in ['png', 'tif', 'tiff', 'exr']:
+        bit_depth = 'half'  # Force 16-bit for other formats
     else:
-        command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', additional_options, '--oiio', texture]
-        if color_space == 'lin_srgb' and color_config:
-            command += ['--colorconfig', color_config, '--colorconvert', 'lin_srgb', 'ACES - ACEScg']
-        elif color_space == 'srgb_texture' and color_config:
-            command += ['--colorconfig', color_config, '--colorconvert', 'srgb_texture', 'ACES - ACEScg']
+        bit_depth = 'uint16'  # Default to 16-bit for unsupported formats
+
+    # Add compression flag if enabled and not a displacement file
+    use_compression = cmds.checkBox(compression_checkbox, query=True, value=True)
+    compression_flag = []
+    if use_compression and not is_displacement:
+        compression_flag = ['--compression', 'dwaa']  # Add correct compression flag for non-displacement files
+
+    # Construct maketx command
+    command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
+
+    # Add color space and conversion options for lin_srgb and srgb_texture
+    if color_space in ['lin_srgb', 'srgb_texture'] and color_config:
+        command += ['--colorconfig', color_config]
+        if color_space == 'lin_srgb':
+            command += ['--colorconvert', 'lin_srgb', 'ACES - ACEScg']
+        elif color_space == 'srgb_texture':
+            command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
+
+    # Debug: Log the constructed command
+    print("Constructed maketx command:")
+    print(' '.join(command))
 
     # Run the maketx command
     try:
@@ -210,8 +243,6 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         print(f"Converted: {texture} -> {output_path}")
     except subprocess.CalledProcessError as e:
         print(f"Failed to convert {texture}: {e}")
-
-
 
 
 create_ui()
