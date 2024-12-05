@@ -283,8 +283,11 @@ def convert_texture_to_tx(texture, color_space, additional_options):
     if use_compression and not is_displacement:
         compression_flag = ['--compression', 'dwaa']
 
-    # Process for RenderMan .tex
-    if cmds.checkBox(renderman_checkbox, query=True, value=True) and txmake_path:
+    # Check if RenderMan conversion is enabled
+    use_renderman = cmds.checkBox(renderman_checkbox, query=True, value=True)
+
+    # RenderMan .tex Conversion
+    if use_renderman and txmake_path:
         print(f"Converting {texture} to RenderMan .tex format...")
         txmake_command = [txmake_path, texture, renderman_output_path]
 
@@ -307,8 +310,9 @@ def convert_texture_to_tx(texture, color_space, additional_options):
             print(f"Converted to RenderMan .tex: {texture} -> {renderman_output_path}")
         except subprocess.CalledProcessError as e:
             print(f"Failed to convert {texture} to .tex: {e}")
+        return  # Exit after RenderMan conversion if checkbox is selected
 
-    # Process for Arnold .tx
+    # Arnold .tx Conversion (only if RenderMan is not selected)
     print(f"Converting {texture} to Arnold .tx format...")
     command = [arnold_path, '-v', '-o', arnold_output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
 
@@ -330,7 +334,6 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         print(f"Converted: {texture} -> {arnold_output_path}")
     except subprocess.CalledProcessError as e:
         print(f"Failed to convert {texture} to .tx: {e}")
-
 
 
 create_ui()
