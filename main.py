@@ -96,7 +96,7 @@ def load_textures(folder_path):
         os.path.join(root, file)
         for root, _, files in os.walk(folder_path)
         for file in files
-        if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.bmp', '.gif'))
+        if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.bmp', '.gif'))  # Original file formats
         and not file.lower().endswith(('.tex', '.tx'))  # Exclude .tex and .tx files
     ]
 
@@ -203,8 +203,15 @@ def process_selected_textures():
         print("Adding missing color space suffixes...")
         rename_files(folder_path, add_suffix=add_suffix_selected)
 
-    # Proceed with processing textures
-    textures = [os.path.join(root, file) for root, _, files in os.walk(folder_path) for file in files]
+    # Collect all textures, but exclude .tex and .tx files
+    textures = [
+        os.path.join(root, file)
+        for root, _, files in os.walk(folder_path)
+        for file in files
+        if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.bmp', '.gif'))  # Original file formats
+        and not file.lower().endswith(('.tex', '.tx'))  # Exclude .tex and .tx files
+    ]
+
     print(f"Total textures found: {len(textures)}")
 
     # Filter by selected types
