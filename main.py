@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def create_ui():
-    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox, rename_checkbox, add_suffix_checkbox
+    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox, add_suffix_checkbox
 
     if cmds.window("txConverter", exists=True):
         cmds.deleteUI("txConverter")
@@ -30,8 +30,7 @@ def create_ui():
     # Compression Flag Checkbox
     compression_checkbox = cmds.checkBox(label="Use DWA Compression", value=True)
 
-    # Rename Checkbox
-    rename_checkbox = cmds.checkBox(label="Rename files based on color space", value=False)
+    # Add Suffix Checkbox
     add_suffix_checkbox = cmds.checkBox(label="Add missing color space suffix", value=False)
 
     # Output Text Area
@@ -39,6 +38,7 @@ def create_ui():
 
     cmds.button(label="Process Textures", command=lambda _: process_selected_textures())
     cmds.showWindow(window)
+
 
 def rename_files(folder_path, add_suffix=False):
     renamed_files = []
@@ -148,8 +148,6 @@ def determine_color_space(filename, extension):
     return 'unknown', '', filename
 
 
-
-
 def display_textures(texture_groups):
     cmds.scrollField(texture_output_field, edit=True, clear=True)
 
@@ -178,7 +176,6 @@ def add_checkboxes_if_tif_found(texture_groups):
         print("No TIF found in SRGB_TEXTURE group. Checkboxes will not be shown.")
 
 
-
 def process_selected_textures():
     folder_path = cmds.textField(folder_path_field, query=True, text=True)
     if not folder_path:
@@ -186,11 +183,9 @@ def process_selected_textures():
         return
 
     # Handle renaming if checkbox is selected
-    rename_selected = cmds.checkBox(rename_checkbox, query=True, value=True)
     add_suffix_selected = cmds.checkBox(add_suffix_checkbox, query=True, value=True)
-
-    if rename_selected:
-        print("Renaming files based on color space...")
+    if add_suffix_selected:
+        print("Adding missing color space suffixes...")
         rename_files(folder_path, add_suffix=add_suffix_selected)
 
     # Proceed with processing textures
@@ -222,20 +217,17 @@ def process_selected_textures():
         cmds.warning("No textures matched the selected types for processing.")
 
 
-
-
 def convert_texture_to_tx(texture, color_space, additional_options):
-    arnold_path = os.environ.get("MAKETX_PATH", "maketx")  # Use environment variable for maketx
-    color_config = os.environ.get("OCIO_CONFIG", "")  # Use environment variable for OCIO config
+    arnold_path = os.environ.get("MAKETX_PATH", "maketx")
+    color_config = os.environ.get("OCIO_CONFIG", "")
     output_folder = os.path.dirname(texture)
     base_name = os.path.splitext(os.path.basename(texture))[0]
-    ext = os.path.splitext(texture)[1].lower()[1:]  # Get extension without the dot (e.g., 'jpg')
+    ext = os.path.splitext(texture)[1].lower()[1:]
 
-    # Naming logic for .tx files
     duplicate_files = [file for file in os.listdir(output_folder) if base_name in file and file.endswith(('.exr', '.jpg', '.png', '.tif', '.tiff', '.bmp', '.gif'))]
-    if len(duplicate_files) > 1 and ext != 'exr':  # Add suffix for non-EXR files when duplicates exist
+    if len(duplicate_files) > 1 and ext != 'exr':
         tx_name = f"{base_name}_{ext}.tx"
-    else:  # EXR files or non-duplicates keep original base name
+    else:
         tx_name = f"{base_name}.tx"
 
     output_path = os.path.join(output_folder, tx_name)
@@ -244,35 +236,29 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         cmds.warning("maketx path not set or invalid. Please check your environment variables.")
         return
 
-    # Determine if this is a displacement file
     is_displacement = re.search(r'_disp|_displacement|_zdisp', texture, re.IGNORECASE)
 
-    # Determine bit-depth based on file type and displacement status
     if is_displacement:
-        bit_depth = 'float'  # Force 32-bit for displacement files
+        bit_depth = 'float'
     elif ext in ['jpg', 'jpeg', 'gif', 'bmp']:
-        bit_depth = 'uint8'  # Force 8-bit for these formats
+        bit_depth = 'uint8'
     elif ext in ['png', 'tif', 'tiff', 'exr']:
-        bit_depth = 'half'  # Force 16-bit for other formats
+        bit_depth = 'half'
     else:
-        bit_depth = 'uint16'  # Default to 16-bit for unsupported formats
+        bit_depth = 'uint16'
 
-    # Add compression flag if enabled and not a displacement file
     use_compression = cmds.checkBox(compression_checkbox, query=True, value=True)
     compression_flag = []
     if use_compression and not is_displacement:
-        compression_flag = ['--compression', 'dwaa']  # Add compression flag for non-displacement files
+        compression_flag = ['--compression', 'dwaa']
 
-    # Debug: Log whether compression is applied
     if is_displacement:
         print(f"Skipping compression for displacement file: {texture}")
     else:
         print(f"Applying compression to file: {texture}")
 
-    # Construct maketx command
     command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
 
-    # Add color space and conversion options for lin_srgb and srgb_texture
     if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
         command += ['--colorconfig', color_config]
         if color_space == 'lin_srgb':
@@ -280,15 +266,14 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         elif color_space == 'srgb_texture':
             command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
 
-    # Debug: Log the constructed command
     print("Constructed maketx command:")
     print(' '.join(command))
 
-    # Run the maketx command
     try:
         subprocess.run(command, check=True)
         print(f"Converted: {texture} -> {output_path}")
     except subprocess.CalledProcessError as e:
         print(f"Failed to convert {texture}: {e}")
+
 
 create_ui()
