@@ -1,2 +1,4 @@
 # TX Converter
- converts all textures to arnold tx
+ Converts textures to arnold tx and renderman tex.
+ Renames files if desired.
+ 
