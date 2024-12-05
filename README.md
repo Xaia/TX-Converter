@@ -3,6 +3,7 @@
  
  Renames files if desired.
 
- set MAKETX_PATH = maketx.exe (for arnold)
- set OCIO = config
+ set MAKETX_PATH = path/to/arnold/maketx.exe 
+ 
+ set OCIO = path/to/config.ocio
 
