@@ -7,12 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def create_ui():
-    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox, add_suffix_checkbox
+    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox, add_suffix_checkbox, renderman_checkbox
 
     if cmds.window("txConverter", exists=True):
         cmds.deleteUI("txConverter")
 
-    window = cmds.window("txConverter", title="Convert to .tx", widthHeight=(400, 500))
+    window = cmds.window("txConverter", title="Convert to .tx/.tex", widthHeight=(400, 550))
     cmds.columnLayout(adjustableColumn=True)
 
     # Path Selection
@@ -33,8 +33,11 @@ def create_ui():
     # Add Suffix Checkbox
     add_suffix_checkbox = cmds.checkBox(label="Add missing color space suffix", value=False)
 
+    # RenderMan Checkbox
+    renderman_checkbox = cmds.checkBox(label="Convert to RenderMan .tex", value=False)
+
     # Output Text Area
-    texture_output_field = cmds.scrollField(editable=False, wordWrap=True, height=200)
+    texture_output_field = cmds.scrollField(editable=False, wordWrap=True, height=250)
 
     cmds.button(label="Process Textures", command=lambda _: process_selected_textures())
     cmds.showWindow(window)
