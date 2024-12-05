@@ -21,18 +21,17 @@ def create_ui():
     cmds.button(label="Choose Folder", command=lambda _: cmds.textField(folder_path_field, edit=True, text=cmds.fileDialog2(fileMode=3)[0]))
     cmds.button(label="Load Textures", command=lambda _: load_textures(cmds.textField(folder_path_field, query=True, text=True)))
 
-    # Texture Type Checkboxes
+    # Texture Type Checkboxes (added dynamically only if .tif is found)
     cmds.text(label="Select texture type:")
-    srgb_checkbox = cmds.checkBox(label="sRGB Texture", value=False)
-    lin_srgb_checkbox = cmds.checkBox(label="Linear sRGB (lin_srgb)", value=False)
-    raw_checkbox = cmds.checkBox(label="Raw", value=False)
+    srgb_checkbox = None
+    lin_srgb_checkbox = None
+    raw_checkbox = None
 
     # Output Text Area
     texture_output_field = cmds.scrollField(editable=False, wordWrap=True, height=200)
 
     cmds.button(label="Process Textures", command=lambda _: process_selected_textures())
     cmds.showWindow(window)
-
 
 
 def load_textures(folder_path):
@@ -51,8 +50,9 @@ def load_textures(folder_path):
     # Group textures by color space and extension
     texture_groups = group_textures_by_color_space_and_extension(textures)
 
-    # Display grouped textures
+    # Display grouped textures and add checkboxes dynamically if .tif is found
     display_textures(texture_groups)
+    add_checkboxes_if_tif_found(texture_groups)
 
 
 def group_textures_by_color_space_and_extension(textures):
@@ -70,16 +70,7 @@ def group_textures_by_color_space_and_extension(textures):
 def determine_color_space(filename, extension):
     """
     Determine the color space of a texture based on its filename patterns and extension.
-    Args:
-        filename (str): The name of the texture file (e.g., "example_8K_Albedo.exr").
-        extension (str): The file extension (e.g., ".exr", ".png").
-    Returns:
-        tuple: (color_space, additional_options, new_filename)
-            - color_space: The detected color space (e.g., "raw", "lin_srgb", "srgb_texture").
-            - additional_options: Any additional options needed for processing.
-            - new_filename: Suggested new filename with the appropriate suffix.
     """
-
     # RAW textures (non-color data)
     if re.search(r'_depth|_disp|_normal|_mask|_rough|_metal|_gloss|_spec|_ao|_cavity|_bump|_displacement|_nrm', filename, re.IGNORECASE):
         return 'raw', '-d float', filename.replace(extension, '_raw' + extension)
@@ -90,6 +81,11 @@ def determine_color_space(filename, extension):
             return 'srgb_texture', '', filename.replace(extension, '_srgb_texture' + extension)
         elif extension.lower() == '.exr':
             return 'lin_srgb', '', filename.replace(extension, '_lin_srgb' + extension)
+
+    # Ignore non-image files
+    if extension.lower() not in ['.jpg', '.png', '.jpeg', '.bmp', '.gif', '.tif', '.exr']:
+        print(f"Skipped non-image file: {filename}")
+        return 'unknown', '', filename
 
     # Default handling for extensions
     if extension.lower() == '.exr':
@@ -104,90 +100,118 @@ def determine_color_space(filename, extension):
 
 
 
-
 def display_textures(texture_groups):
     cmds.scrollField(texture_output_field, edit=True, clear=True)
 
+    total_textures = 0
     output = ""
     for color_space, extensions in texture_groups.items():
         output += f"\n{color_space.upper()}:\n"
         for ext, textures in extensions.items():
+            total_textures += len(textures)
             output += f"  {ext.upper()}:\n"
             output += "\n".join(f"    - {os.path.basename(tex)}" for tex in textures)
             output += "\n"
 
+    output += f"\nTotal Textures to Convert: {total_textures}"
     cmds.scrollField(texture_output_field, edit=True, text=output.strip())
 
-    # Auto-select checkboxes based on groups
-    cmds.checkBox(srgb_checkbox, edit=True, value="srgb_texture" in texture_groups)
-    cmds.checkBox(lin_srgb_checkbox, edit=True, value="lin_srgb" in texture_groups)
-    cmds.checkBox(raw_checkbox, edit=True, value="raw" in texture_groups)
+
+def add_checkboxes_if_tif_found(texture_groups):
+    global srgb_checkbox
+
+    if 'srgb_texture' in texture_groups and '.tif' in texture_groups['srgb_texture']:
+        print("TIF found in SRGB_TEXTURE group. Adding checkbox.")
+        if srgb_checkbox is None:
+            srgb_checkbox = cmds.checkBox(label="sRGB Texture (TIF)", value=False)
+    else:
+        print("No TIF found in SRGB_TEXTURE group. Checkboxes will not be shown.")
+
 
 
 def process_selected_textures():
-    srgb_selected = cmds.checkBox(srgb_checkbox, query=True, value=True)
-    lin_srgb_selected = cmds.checkBox(lin_srgb_checkbox, query=True, value=True)
-    raw_selected = cmds.checkBox(raw_checkbox, query=True, value=True)
+    # Check if .tif checkboxes exist (only relevant if .tif files are present)
+    srgb_selected = cmds.checkBox(srgb_checkbox, query=True, value=True) if srgb_checkbox else True
 
-    if not (srgb_selected or lin_srgb_selected or raw_selected):
-        cmds.warning("No texture type selected. Please select at least one type.")
-        return
-
-    folder_path = cmds.textField(folder_path_field, query=True, text=True)  # Corrected reference
+    folder_path = cmds.textField(folder_path_field, query=True, text=True)
     if not folder_path:
         cmds.warning("No folder path found.")
         return
 
     # Collect textures for conversion
     textures = [os.path.join(root, file) for root, _, files in os.walk(folder_path) for file in files]
+    print(f"Total textures found: {len(textures)}")
 
     # Filter by selected types
     selected_textures = []
+    skipped_textures = []
     for texture in textures:
         color_space, additional_options, _ = determine_color_space(texture, os.path.splitext(texture)[1].lower())
-        if (srgb_selected and color_space == "srgb_texture") or \
-           (lin_srgb_selected and color_space == "lin_srgb") or \
-           (raw_selected and color_space == "raw"):
-            selected_textures.append((texture, color_space, additional_options))
+        if color_space in ["lin_srgb", "srgb_texture", "raw"]:  # Include RAW textures
+            if (os.path.splitext(texture)[1].lower() != '.tif') or srgb_selected:
+                print(f"Selected for conversion: {texture}")
+                selected_textures.append((texture, color_space, additional_options))
+            else:
+                skipped_textures.append(texture)
+        else:
+            skipped_textures.append(texture)
+
+    # Debug: Log skipped textures
+    if skipped_textures:
+        print(f"Skipped textures: {len(skipped_textures)}")
+        for tex in skipped_textures:
+            print(f"Skipped: {tex}")
 
     # Start conversion process
     if selected_textures:
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        print(f"Converting {len(selected_textures)} textures...")
+        with ThreadPoolExecutor(max_workers=8) as executor:
             executor.map(lambda args: convert_texture_to_tx(*args), selected_textures)
     else:
         cmds.warning("No textures matched the selected types for processing.")
 
 
 
+
+
 def convert_texture_to_tx(texture, color_space, additional_options):
     arnold_path = os.environ.get("MAKETX_PATH", "maketx")  # Use environment variable for maketx
     color_config = os.environ.get("OCIO_CONFIG", "")  # Use environment variable for OCIO config
-    output_color_space = "ACES - ACEScg"
     output_folder = os.path.dirname(texture)
-    output_path = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(texture))[0]}.tx")
+    base_name = os.path.splitext(os.path.basename(texture))[0]
+    ext = os.path.splitext(texture)[1].lower()[1:]  # Get extension without the dot (e.g., 'jpg')
+
+    # Naming logic for .tx files
+    duplicate_files = [file for file in os.listdir(output_folder) if base_name in file and file.endswith(('.exr', '.jpg', '.png', '.tif', '.tiff'))]
+    if len(duplicate_files) > 1 and ext != 'exr':  # Add suffix for non-EXR files when duplicates exist
+        tx_name = f"{base_name}_{ext}.tx"
+    else:  # EXR files or non-duplicates keep original base name
+        tx_name = f"{base_name}.tx"
+
+    output_path = os.path.join(output_folder, tx_name)
 
     if not arnold_path or not os.path.exists(arnold_path):
         cmds.warning("maketx path not set or invalid. Please check your environment variables.")
         return
 
-    if 'raw' in color_space.lower():
-        command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', '--fixnan', 'box3', '--oiio', texture]
-    elif 'lin_srgb' in color_space.lower():
-        command = [
-            arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', additional_options, '--fixnan', 'box3',
-            '--colorconfig', color_config, '--colorconvert', 'lin_srgb', output_color_space, '--unpremult', '--oiio', texture
-        ]
-    elif 'srgb_texture' in color_space.lower():
-        command = [
-            arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', additional_options, '--fixnan', 'box3',
-            '--colorconfig', color_config, '--colorconvert', 'srgb_texture', output_color_space, '--unpremult', '--oiio', texture
-        ]
+    # Construct maketx command
+    if color_space == 'raw':
+        command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', '--oiio', texture]
+    else:
+        command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', additional_options, '--oiio', texture]
+        if color_space == 'lin_srgb' and color_config:
+            command += ['--colorconfig', color_config, '--colorconvert', 'lin_srgb', 'ACES - ACEScg']
+        elif color_space == 'srgb_texture' and color_config:
+            command += ['--colorconfig', color_config, '--colorconvert', 'srgb_texture', 'ACES - ACEScg']
 
+    # Run the maketx command
     try:
         subprocess.run(command, check=True)
         print(f"Converted: {texture} -> {output_path}")
     except subprocess.CalledProcessError as e:
         print(f"Failed to convert {texture}: {e}")
+
+
 
 
 create_ui()
