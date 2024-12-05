@@ -7,12 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def create_ui():
-    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox, add_suffix_checkbox, renderman_checkbox
+    global folder_path_field, srgb_checkbox, lin_srgb_checkbox, raw_checkbox, texture_output_field, compression_checkbox, add_suffix_checkbox, renderman_checkbox, rename_to_acescg_checkbox
 
     if cmds.window("txConverter", exists=True):
         cmds.deleteUI("txConverter")
 
-    window = cmds.window("txConverter", title="Convert to .tx/.tex", widthHeight=(400, 550))
+    window = cmds.window("txConverter", title="Convert to .tx/.tex", widthHeight=(400, 600))
     cmds.columnLayout(adjustableColumn=True)
 
     # Path Selection
@@ -36,11 +36,15 @@ def create_ui():
     # RenderMan Checkbox
     renderman_checkbox = cmds.checkBox(label="Convert to RenderMan .tex", value=False)
 
+    # Rename to ACEScg Checkbox
+    rename_to_acescg_checkbox = cmds.checkBox(label="Rename to ACEScg Color Space", value=False)
+
     # Output Text Area
     texture_output_field = cmds.scrollField(editable=False, wordWrap=True, height=250)
 
     cmds.button(label="Process Textures", command=lambda _: process_selected_textures())
     cmds.showWindow(window)
+
 
 
 def rename_files(folder_path, add_suffix=False):
@@ -223,24 +227,29 @@ def process_selected_textures():
 def convert_texture_to_tx(texture, color_space, additional_options):
     arnold_path = os.environ.get("MAKETX_PATH", "maketx")
     color_config = os.environ.get("OCIO_CONFIG", "")
+    renderman_path = os.environ.get("RMANTREE", "")  # RenderMan's root directory
+    txmake_path = os.path.join(renderman_path, "bin", "txmake") if renderman_path else None
+
     output_folder = os.path.dirname(texture)
     base_name = os.path.splitext(os.path.basename(texture))[0]
     ext = os.path.splitext(texture)[1].lower()[1:]
 
-    duplicate_files = [file for file in os.listdir(output_folder) if base_name in file and file.endswith(('.exr', '.jpg', '.png', '.tif', '.tiff', '.bmp', '.gif'))]
-    if len(duplicate_files) > 1 and ext != 'exr':
-        tx_name = f"{base_name}_{ext}.tx"
-    else:
-        tx_name = f"{base_name}.tx"
+    # Check if the user wants to rename to ACEScg
+    rename_to_acescg = cmds.checkBox(rename_to_acescg_checkbox, query=True, value=True)
+    suffix = "_acescg" if rename_to_acescg else f"_{color_space}"
 
-    output_path = os.path.join(output_folder, tx_name)
+    # Replace existing color space suffix if renaming to ACEScg
+    if rename_to_acescg:
+        base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb)$', '', base_name)
 
-    if not arnold_path or not os.path.exists(arnold_path):
-        cmds.warning("maketx path not set or invalid. Please check your environment variables.")
-        return
+    # Naming logic for output files
+    arnold_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tx")
+    renderman_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tex")
 
+    # Determine if this is a displacement file
     is_displacement = re.search(r'_disp|_displacement|_zdisp', texture, re.IGNORECASE)
 
+    # Determine bit-depth based on file type and displacement status
     if is_displacement:
         bit_depth = 'float'
     elif ext in ['jpg', 'jpeg', 'gif', 'bmp']:
@@ -250,33 +259,61 @@ def convert_texture_to_tx(texture, color_space, additional_options):
     else:
         bit_depth = 'uint16'
 
+    # Add compression flag if enabled and not a displacement file
     use_compression = cmds.checkBox(compression_checkbox, query=True, value=True)
     compression_flag = []
     if use_compression and not is_displacement:
         compression_flag = ['--compression', 'dwaa']
 
-    if is_displacement:
-        print(f"Skipping compression for displacement file: {texture}")
+    # Check if RenderMan conversion is enabled
+    use_renderman = cmds.checkBox(renderman_checkbox, query=True, value=True)
+
+    if use_renderman and txmake_path:
+        print(f"Converting {texture} to RenderMan .tex format...")
+        txmake_command = [txmake_path, texture, renderman_output_path]
+
+        # Add bit-depth if needed for RenderMan
+        if ext in ['jpg', 'jpeg', 'gif', 'bmp']:
+            # Do not add incompatible flags for uint8 formats
+            pass
+        elif bit_depth == 'half':
+            txmake_command += ["-mode", "luminance"]
+        elif bit_depth == 'float':
+            txmake_command += ["-mode", "luminance"]
+
+        # Debug: Log constructed txmake command
+        print("Constructed txmake command:")
+        print(' '.join(txmake_command))
+        
+        # Run txmake command
+        try:
+            subprocess.run(txmake_command, check=True)
+            print(f"Converted to RenderMan .tex: {texture} -> {renderman_output_path}")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to convert {texture} to .tex: {e}")
     else:
-        print(f"Applying compression to file: {texture}")
+        # Proceed with Arnold .tx conversion
+        print(f"Converting {texture} to Arnold .tx format...")
+        command = [arnold_path, '-v', '-o', arnold_output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
 
-    command = [arnold_path, '-v', '-o', output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
+        # Add color space and conversion options for lin_srgb and srgb_texture
+        if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
+            command += ['--colorconfig', color_config]
+            if color_space == 'lin_srgb':
+                command += ['--colorconvert', 'lin_srgb', 'ACES - ACEScg']
+            elif color_space == 'srgb_texture':
+                command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
 
-    if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
-        command += ['--colorconfig', color_config]
-        if color_space == 'lin_srgb':
-            command += ['--colorconvert', 'lin_srgb', 'ACES - ACEScg']
-        elif color_space == 'srgb_texture':
-            command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
-
-    print("Constructed maketx command:")
-    print(' '.join(command))
-
-    try:
-        subprocess.run(command, check=True)
-        print(f"Converted: {texture} -> {output_path}")
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to convert {texture}: {e}")
+        # Debug: Log constructed maketx command
+        print("Constructed maketx command:")
+        print(' '.join(command))
+        
+        # Run the maketx command
+        try:
+            subprocess.run(command, check=True)
+            print(f"Converted: {texture} -> {arnold_output_path}")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to convert {texture} to .tx: {e}")
 
 
 create_ui()
