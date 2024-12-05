@@ -91,20 +91,28 @@ def load_textures(folder_path):
         cmds.warning("No folder selected.")
         return
 
-    # Collect textures from the folder
-    textures = [os.path.join(root, file) for root, _, files in os.walk(folder_path) for file in files
-                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.bmp', '.gif'))]
+    # Collect textures from the folder while excluding .tex and .tx files
+    textures = [
+        os.path.join(root, file)
+        for root, _, files in os.walk(folder_path)
+        for file in files
+        if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.bmp', '.gif'))
+        and not file.lower().endswith(('.tex', '.tx'))  # Exclude .tex and .tx files
+    ]
 
     if not textures:
-        cmds.warning("No texture files found in the selected folder.")
+        cmds.warning("No valid texture files found in the selected folder.")
         return
 
     # Group textures by color space and extension
     texture_groups = group_textures_by_color_space_and_extension(textures)
 
-    # Display grouped textures and add checkboxes dynamically if .tif is found
+    # Display grouped textures
     display_textures(texture_groups)
+
+    # Add checkboxes if needed
     add_checkboxes_if_tif_found(texture_groups)
+
 
 
 def group_textures_by_color_space_and_extension(textures):
@@ -234,15 +242,25 @@ def convert_texture_to_tx(texture, color_space, additional_options):
     base_name = os.path.splitext(os.path.basename(texture))[0]
     ext = os.path.splitext(texture)[1].lower()[1:]
 
+    # Skip .tex and .tx files explicitly
+    if ext in ["tex", "tx"]:
+        print(f"Skipping file as it is already a processed file: {texture}")
+        return
+
     # Check if the user wants to rename to ACEScg
     rename_to_acescg = cmds.checkBox(rename_to_acescg_checkbox, query=True, value=True)
-    suffix = "_acescg" if rename_to_acescg else f"_{color_space}"
-
-    # Replace existing color space suffix if renaming to ACEScg
     if rename_to_acescg:
+        # Replace any existing color space suffix with _acescg
         base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb)$', '', base_name)
+        suffix = "_acescg"
+    else:
+        # Only add the color space suffix if the original texture does not already have one
+        if not re.search(r'(_raw|_srgb_texture|_lin_srgb)$', base_name, re.IGNORECASE):
+            suffix = f"_{color_space}"
+        else:
+            suffix = ""  # No suffix needed if it already exists
 
-    # Naming logic for output files
+    # Construct output file paths
     arnold_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tx")
     renderman_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tex")
 
@@ -265,10 +283,8 @@ def convert_texture_to_tx(texture, color_space, additional_options):
     if use_compression and not is_displacement:
         compression_flag = ['--compression', 'dwaa']
 
-    # Check if RenderMan conversion is enabled
-    use_renderman = cmds.checkBox(renderman_checkbox, query=True, value=True)
-
-    if use_renderman and txmake_path:
+    # Process for RenderMan .tex
+    if cmds.checkBox(renderman_checkbox, query=True, value=True) and txmake_path:
         print(f"Converting {texture} to RenderMan .tex format...")
         txmake_command = [txmake_path, texture, renderman_output_path]
 
@@ -284,36 +300,37 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         # Debug: Log constructed txmake command
         print("Constructed txmake command:")
         print(' '.join(txmake_command))
-        
+
         # Run txmake command
         try:
             subprocess.run(txmake_command, check=True)
             print(f"Converted to RenderMan .tex: {texture} -> {renderman_output_path}")
         except subprocess.CalledProcessError as e:
             print(f"Failed to convert {texture} to .tex: {e}")
-    else:
-        # Proceed with Arnold .tx conversion
-        print(f"Converting {texture} to Arnold .tx format...")
-        command = [arnold_path, '-v', '-o', arnold_output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
 
-        # Add color space and conversion options for lin_srgb and srgb_texture
-        if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
-            command += ['--colorconfig', color_config]
-            if color_space == 'lin_srgb':
-                command += ['--colorconvert', 'lin_srgb', 'ACES - ACEScg']
-            elif color_space == 'srgb_texture':
-                command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
+    # Process for Arnold .tx
+    print(f"Converting {texture} to Arnold .tx format...")
+    command = [arnold_path, '-v', '-o', arnold_output_path, '-u', '--format', 'exr', '-d', bit_depth] + compression_flag + ['--oiio', texture]
 
-        # Debug: Log constructed maketx command
-        print("Constructed maketx command:")
-        print(' '.join(command))
-        
-        # Run the maketx command
-        try:
-            subprocess.run(command, check=True)
-            print(f"Converted: {texture} -> {arnold_output_path}")
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to convert {texture} to .tx: {e}")
+    # Add color space and conversion options for lin_srgb and srgb_texture
+    if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
+        command += ['--colorconfig', color_config]
+        if color_space == 'lin_srgb':
+            command += ['--colorconvert', 'lin_srgb', 'ACES - ACEScg']
+        elif color_space == 'srgb_texture':
+            command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
+
+    # Debug: Log constructed maketx command
+    print("Constructed maketx command:")
+    print(' '.join(command))
+
+    # Run the maketx command
+    try:
+        subprocess.run(command, check=True)
+        print(f"Converted: {texture} -> {arnold_output_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to convert {texture} to .tx: {e}")
+
 
 
 create_ui()
