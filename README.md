@@ -10,4 +10,4 @@
 TODO:
 Fixing some kinks with Tifs
 
-![image](https://github.com/user-attachments/assets/75bd77a8-75b8-434e-8e43-ccf878cd330c)
+![image](https://github.com/user-attachments/assets/687a43cc-a022-4016-9aa6-16a56ed79699)
