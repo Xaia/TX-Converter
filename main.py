@@ -342,8 +342,14 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb)$', '', base_name, flags=re.IGNORECASE)
         suffix = "_acescg"
     else:
-        if not re.search(r'(_raw|_srgb_texture|_lin_srgb)$', base_name, re.IGNORECASE):
-            suffix = f"_{color_space}"
+        # Check if the add suffix checkbox is enabled
+        add_suffix_selected = cmds.checkBox(add_suffix_checkbox, query=True, value=True)
+        if add_suffix_selected:
+            # Only add suffix if not already present
+            if not re.search(r'(_raw|_srgb_texture|_lin_srgb)$', base_name, re.IGNORECASE):
+                suffix = f"_{color_space}"
+            else:
+                suffix = ""
         else:
             suffix = ""
 
