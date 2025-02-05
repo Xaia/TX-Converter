@@ -39,7 +39,7 @@ class TxConverterUI(QtWidgets.QDialog):
         super(TxConverterUI, self).__init__(parent)
         self.setWindowTitle("TX Converter")
         self.setGeometry(100, 100, 600, 700)
-        self.setMinimumSize(400, 650)
+        self.setMinimumSize(400, 850)
         # Use a frameless window but do NOT set a translucent attribute
         # so that the entire dialog is opaque.
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
@@ -617,7 +617,7 @@ class TxConverterUI(QtWidgets.QDialog):
         else:
             self.unsetCursor()
             
-def show_tx_converter():
+def show_tx_converter_standalone():
     global tx_converter_dialog
     try:
         parent = get_maya_main_window()
@@ -633,4 +633,4 @@ def show_tx_converter():
     tx_converter_dialog.activateWindow()
     
 if __name__ == "__main__":
-    show_tx_converter()
+    show_tx_converter_standalone()
