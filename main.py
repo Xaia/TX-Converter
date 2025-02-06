@@ -271,7 +271,7 @@ def rename_files(folder_path, add_suffix=False, recurse=True):
 def process_selected_textures():
     """
     After user clicks "Process Textures":
-      1) optional rename
+      1) optionally rename
       2) gather recognized images
       3) convert
     """
@@ -310,10 +310,10 @@ def process_selected_textures():
         for st in skipped_textures:
             print(f"  {st}")
 
-    # Convert recognized
+    # Convert recognized textures with a limit of 10 conversions running concurrently.
     if selected_textures:
         print(f"Converting {len(selected_textures)} textures...")
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             executor.map(lambda args: convert_texture_to_tx(*args), selected_textures)
     else:
         cmds.warning("No textures matched the recognized color spaces for processing.")
@@ -419,4 +419,5 @@ def convert_texture_to_tx(texture, color_space, additional_options):
         print(f"Failed to convert {texture} to .tx: {e}")
 
 
-create_ui()
+def show_tx_converter_classic():
+    create_ui()
