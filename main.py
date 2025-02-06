@@ -1,12 +1,13 @@
 """
-TX Converter Tool for Autodesk Maya with QThread-based Batch Processing and Progress Bar
+TX Converter Tool for Autodesk Maya with QThread-based Batch Processing,
+Progress Bar, and Info Window Tint Change Upon Completion
 
 This script creates a modern, frameless PySide2 dialog that gathers texture files,
-groups them by color space, and then converts them using maketx (for Arnold) or
-txmake (for RenderMan) in batches of 6 concurrently. The conversion is done in a 
-separate QThread to avoid freezing Maya, and progress is displayed via a progress bar.
-All log messages from worker threads are sent via signals so that UI updates occur 
-safely on the main thread.
+groups them by color space, and converts them using maketx (for Arnold) or txmake (for RenderMan)
+in batches of 6 concurrently. The conversion is done in a separate QThread so that Maya's UI
+remains responsive. A QProgressBar displays progress and, once all conversions are complete,
+the info output window (QTextEdit) changes its background to a greenish tint. When new textures
+are loaded, it reverts to the normal dark style.
 """
 
 import os
@@ -38,7 +39,7 @@ def get_maya_main_window():
 # Worker Class for Texture Conversion
 # -----------------------------------------------------------
 class TextureWorker(QtCore.QObject):
-    # Signals to communicate with the UI
+    # Signals to communicate with the UI (delivered on the main thread)
     progressSignal = QtCore.Signal(int)  # emits the number of textures processed so far
     logSignal = QtCore.Signal(str)       # emits log messages
     finishedSignal = QtCore.Signal()     # emitted when all conversions are done
@@ -70,7 +71,7 @@ class TextureWorker(QtCore.QObject):
                            (texture, color_space) for texture, color_space, additional_options in batch}
                 for future in as_completed(futures):
                     try:
-                        future.result()
+                        future.result()  # Raise exception if any occurred.
                     except Exception as e:
                         self.logSignal.emit("Error during conversion: {}".format(e))
                     processed += 1
@@ -78,7 +79,6 @@ class TextureWorker(QtCore.QObject):
         self.finishedSignal.emit()
 
     def convert_texture(self, texture, color_space, additional_options):
-        # Conversion routine – similar to our UI version.
         self.logSignal.emit("Starting conversion for {}...".format(os.path.basename(texture)))
         arnold_path = os.environ.get("MAKETX_PATH", "maketx")
         color_config = os.environ.get("RV_OCIO", "")
@@ -121,7 +121,7 @@ class TextureWorker(QtCore.QObject):
         if self.use_compression and not is_displacement:
             compression_flag = ['--compression', 'dwaa']
 
-        # RenderMan branch
+        # RenderMan conversion branch.
         if self.use_renderman and txmake_path:
             self.logSignal.emit("Converting {} to RenderMan .tex...".format(os.path.basename(texture)))
             txmake_command = [txmake_path, texture, renderman_output_path]
@@ -175,12 +175,12 @@ class TxConverterUI(QtWidgets.QDialog):
         super(TxConverterUI, self).__init__(parent)
         self.setWindowTitle("TX Converter")
         self.setGeometry(100, 100, 600, 700)
-        self.setMinimumSize(400, 650)
+        self.setMinimumSize(400, 850)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setWindowOpacity(1.0)
         self.setStyleSheet("background-color: #2D2D2D;")  # Opaque background
 
-        # Placeholders for our worker thread and worker object.
+        # Placeholders for worker thread and worker.
         self.worker = None
         self.worker_thread = None
 
@@ -196,8 +196,12 @@ class TxConverterUI(QtWidgets.QDialog):
             "selection": "#3A3A3A",
             "menu_bg": "#363636"
         }
+        # Styles for the output info window.
+        self.normalOutputStyle = "background-color: {}; color: {}; border-radius: 4px; padding: 8px;".format(
+            self.COLORS["input_bg"], self.COLORS["text"])
+        self.completedOutputStyle = "background-color: #388E3C; color: white; border-radius: 4px; padding: 8px;"
 
-        # Variables for window moving/resizing
+        # Variables for moving/resizing the window
         self.resize_margin = 25
         self._is_moving = False
         self._move_start_offset = QtCore.QPoint()
@@ -272,8 +276,10 @@ class TxConverterUI(QtWidgets.QDialog):
         content_layout.setContentsMargins(24, 16, 24, 16)
         content_layout.setSpacing(16)
 
-        # --- load_textures() method is restored here ---
+        # --- load_textures() method (restores output style to normal) ---
         def load_textures_impl():
+            # When new textures are loaded, revert the output field style to normal.
+            self.output_field.setStyleSheet(self.normalOutputStyle)
             folder_path = self.folder_line_edit.text().strip()
             if not folder_path:
                 QtWidgets.QMessageBox.warning(self, "Warning", "No folder selected.")
@@ -290,8 +296,8 @@ class TxConverterUI(QtWidgets.QDialog):
                 color_space, additional_options, _ = self.determine_color_space(tex, ext, tif_srgb)
                 texture_groups[color_space][ext].append(tex)
             self.display_textures(texture_groups)
-        # Assign our function as a method
         self.load_textures = load_textures_impl
+        # --- end load_textures() ---
 
         # Folder Selection
         folder_label = QtWidgets.QLabel("Select folder to load and group textures:")
@@ -324,7 +330,6 @@ class TxConverterUI(QtWidgets.QDialog):
         load_textures_btn.setStyleSheet("background-color: {}; color: white; border-radius: 18px;".format(self.COLORS["primary"]))
         load_textures_btn.clicked.connect(self.load_textures)
         content_layout.addWidget(load_textures_btn)
-        # --- end load_textures() ---
 
         # Separator
         separator = QtWidgets.QFrame()
@@ -371,15 +376,13 @@ class TxConverterUI(QtWidgets.QDialog):
 
         self.output_field = QtWidgets.QTextEdit()
         self.output_field.setReadOnly(True)
-        self.output_field.setStyleSheet("background-color: {}; color: {}; border-radius: 4px; padding: 8px;".format(
-            self.COLORS["input_bg"], self.COLORS["text"]))
+        self.output_field.setStyleSheet(self.normalOutputStyle)
         self.output_field.setFixedHeight(250)
         content_layout.addWidget(self.output_field)
 
-        # Progress Bar
         self.progressBar = QtWidgets.QProgressBar()
         self.progressBar.setMinimum(0)
-        self.progressBar.setMaximum(0)  # will be set when starting conversion
+        self.progressBar.setMaximum(0)  # will be set when conversion starts
         content_layout.addWidget(self.progressBar)
 
         process_textures_btn = QtWidgets.QPushButton("Process Textures")
@@ -414,11 +417,13 @@ class TxConverterUI(QtWidgets.QDialog):
         self.progressBar.setValue(value)
 
     # ---------------------------
-    # Slot called when worker finishes
+    # Slot called when worker finishes conversion
     # ---------------------------
     @QtCore.Slot()
     def workerFinished(self):
         self.appendLog("Conversion process completed.")
+        # Tint the output info window to a greenish tint.
+        self.output_field.setStyleSheet(self.completedOutputStyle)
         self.worker_thread.quit()
         self.worker_thread.wait()
         self.worker = None
@@ -445,7 +450,7 @@ class TxConverterUI(QtWidgets.QDialog):
         return super(TxConverterUI, self).eventFilter(obj, event)
 
     # ---------------------------
-    # Logging Helper (main thread)
+    # Logging Helper for main thread calls
     # ---------------------------
     def log(self, message):
         self.appendLog(message)
@@ -614,15 +619,13 @@ class TxConverterUI(QtWidgets.QDialog):
 
         self.progressBar.setMaximum(total)
         self.progressBar.setValue(0)
-
         self.log("Starting conversion of {} textures...".format(total))
 
-        # Gather options from checkboxes
         rename_to_acescg = self.rename_to_acescg_checkbox.isChecked()
         use_compression = self.compression_checkbox.isChecked()
         use_renderman = self.renderman_checkbox.isChecked()
 
-        # Set up the worker thread
+        # Set up the worker thread.
         self.worker_thread = QtCore.QThread()
         self.worker = TextureWorker(selected_textures, rename_to_acescg, add_suffix_selected, use_compression, use_renderman)
         self.worker.moveToThread(self.worker_thread)
@@ -642,7 +645,6 @@ class TxConverterUI(QtWidgets.QDialog):
                 self._is_resizing = True
                 self._resize_start_pos = event.globalPos()
                 self._resize_start_geo = self.geometry()
-                # For simplicity, we only support resizing from the bottom-right corner here.
                 event.accept()
             else:
                 event.ignore()
