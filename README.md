@@ -27,11 +27,11 @@ First, make sure you have Python (and pip) installed on your Windows machine. Th
 
 Navigate to the directory containing your script in the Command Prompt:
 
-```cd path\to\your\script```
+```cd path\to\the\main.py```
 
 Then, run PyInstaller with the following command:
 
-```pyinstaller --onefile --noconsole your_script.py```
+```pyinstaller --onefile --noconsole main.py```
 
 
 Env Vars
