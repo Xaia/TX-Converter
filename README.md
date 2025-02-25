@@ -4,7 +4,7 @@
 Features
  - Convert entire folders and subfolders
  - Multithreaded conversion
- - Multi texture conversion
+ - Simultaneous Multi texture conversion
  - Drag and drop
  - DWAA Compression
  - Adding Missing color space suffix to original and tx/tex
