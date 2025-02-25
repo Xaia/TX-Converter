@@ -12,7 +12,7 @@ Fixing some kinks with Tifs
 
 ```
 import tx_converter
-tx_converter.create_ui()
+tx_converter.show_tx_converter()
 ```
 
 
