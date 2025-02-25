@@ -1,13 +1,16 @@
 """
 TX Converter Tool for Autodesk Maya with QThread-based Batch Processing,
-Progress Bar, and Info Window Tint Change Upon Completion
+Progress Bar, Info Window Tint Change, Drag-and-Drop, and optional HDRI mode.
 
-This script creates a modern, frameless PySide2 dialog that gathers texture files,
-groups them by color space, and converts them using maketx (for Arnold) or txmake (for RenderMan)
-in batches of 6 concurrently. The conversion is done in a separate QThread so that Maya's UI
-remains responsive. A QProgressBar displays progress and, once all conversions are complete,
-the info output window (QTextEdit) changes its background to a greenish tint. When new textures
-are loaded, it reverts to the normal dark style.
+This script creates a modern, frameless PySide2 dialog that:
+- Gathers textures either from a selected folder (with optional subfolder recursion)
+  or via drag-and-drop.
+- Groups them by color space, optionally renames them to add missing suffixes,
+  and converts them using maketx (for Arnold) or txmake (for RenderMan).
+- Concurrently processes 6 textures per batch in a separate QThread.
+- Tracks progress with a QProgressBar.
+- Tints the output field in green once all conversions complete.
+- Includes an optional HDRI mode to produce 32-bit float textures.
 """
 
 import os
@@ -26,31 +29,35 @@ try:
 except ImportError:
     from shiboken import wrapInstance
 
-# -----------------------------------------------------------
-# Helper to get Maya’s main window (to parent our dialog)
-# -----------------------------------------------------------
+
+# -------------------------------------------------------------------
+# Helper to get Maya's main window (to parent our dialog).
+# -------------------------------------------------------------------
 def get_maya_main_window():
     main_window_ptr = omui.MQtUtil.mainWindow()
     if main_window_ptr is not None:
         return wrapInstance(int(main_window_ptr), QtWidgets.QWidget)
     return None
 
-# -----------------------------------------------------------
+
+# -------------------------------------------------------------------
 # Worker Class for Texture Conversion
-# -----------------------------------------------------------
+# -------------------------------------------------------------------
 class TextureWorker(QtCore.QObject):
     # Signals to communicate with the UI (delivered on the main thread)
-    progressSignal = QtCore.Signal(int)  # emits the number of textures processed so far
-    logSignal = QtCore.Signal(str)       # emits log messages
-    finishedSignal = QtCore.Signal()     # emitted when all conversions are done
+    progressSignal = QtCore.Signal(int)  
+    logSignal = QtCore.Signal(str)       
+    finishedSignal = QtCore.Signal()     
 
-    def __init__(self, textures, rename_to_acescg, add_suffix_selected, use_compression, use_renderman, parent=None):
+    def __init__(self, textures, rename_to_acescg, add_suffix_selected,
+                 use_compression, use_renderman, hdri_mode=False, parent=None):
         """
-        :param textures: list of tuples (texture, color_space, additional_options)
+        :param textures: list of tuples (texture_path, color_space, additional_options)
         :param rename_to_acescg: bool
         :param add_suffix_selected: bool
         :param use_compression: bool
         :param use_renderman: bool
+        :param hdri_mode: bool - if True, color textures go to 32-bit float instead of half
         """
         super(TextureWorker, self).__init__(parent)
         self.textures = textures
@@ -58,6 +65,7 @@ class TextureWorker(QtCore.QObject):
         self.add_suffix_selected = add_suffix_selected
         self.use_compression = use_compression
         self.use_renderman = use_renderman
+        self.hdri_mode = hdri_mode
 
     def run(self):
         total = len(self.textures)
@@ -67,11 +75,16 @@ class TextureWorker(QtCore.QObject):
         for i in range(0, total, batch_size):
             batch = self.textures[i:i+batch_size]
             with ThreadPoolExecutor(max_workers=batch_size) as executor:
-                futures = {executor.submit(self.convert_texture, texture, color_space, additional_options):
-                           (texture, color_space) for texture, color_space, additional_options in batch}
+                futures = {
+                    executor.submit(
+                        self.convert_texture,
+                        texture, color_space, additional_options
+                    ): (texture, color_space)
+                    for texture, color_space, additional_options in batch
+                }
                 for future in as_completed(futures):
                     try:
-                        future.result()  # Raise exception if any occurred.
+                        future.result()
                     except Exception as e:
                         self.logSignal.emit("Error during conversion: {}".format(e))
                     processed += 1
@@ -92,11 +105,14 @@ class TextureWorker(QtCore.QObject):
             self.logSignal.emit("Skipping already-processed file: {}".format(texture))
             return
 
+        # Adjust name if rename_to_acescg or suffix is used
         if self.rename_to_acescg:
+            # Remove any old suffix then add "_acescg"
             base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb)$', '', base_name, flags=re.IGNORECASE)
             suffix = "_acescg"
         else:
             if self.add_suffix_selected:
+                # If there's no recognized suffix, add it
                 if not re.search(r'(_raw|_srgb_texture|_lin_srgb)$', base_name, re.IGNORECASE):
                     suffix = f"_{color_space}"
                 else:
@@ -107,29 +123,38 @@ class TextureWorker(QtCore.QObject):
         arnold_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tx")
         renderman_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tex")
 
+        # Check if displacement or related
         is_displacement = re.search(r'_disp|_displacement|_zdisp', base_name, re.IGNORECASE)
+
+        # Decide bit depth
         if is_displacement:
             bit_depth = 'float'
-        elif ext in ['jpg', 'jpeg', 'gif', 'bmp']:
-            bit_depth = 'uint8'
-        elif ext in ['png', 'tif', 'tiff', 'exr']:
-            bit_depth = 'half'
         else:
-            bit_depth = 'uint16'
+            # NEW: If HDRI mode is on and color_space != 'raw', use 32-bit float
+            if self.hdri_mode and color_space != 'raw':
+                bit_depth = 'float'
+            else:
+                # fallback to existing logic
+                if ext in ['jpg', 'jpeg', 'gif', 'bmp']:
+                    bit_depth = 'uint8'
+                elif ext in ['png', 'tif', 'tiff', 'exr']:
+                    bit_depth = 'half'
+                else:
+                    bit_depth = 'uint16'
 
         compression_flag = []
         if self.use_compression and not is_displacement:
             compression_flag = ['--compression', 'dwaa']
 
-        # RenderMan conversion branch.
+        # RenderMan .tex branch
         if self.use_renderman and txmake_path:
             self.logSignal.emit("Converting {} to RenderMan .tex...".format(os.path.basename(texture)))
             txmake_command = [txmake_path, texture, renderman_output_path]
             if bit_depth in ['half', 'float']:
-                txmake_command += ["-mode", "luminance"]
+                txmake_command += ["-mode", "luminance"]  
             try:
                 result = subprocess.run(txmake_command, shell=True,
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self.logSignal.emit("txmake output: " + result.stdout.decode('utf-8').strip())
                 if result.stderr:
                     self.logSignal.emit("txmake errors: " + result.stderr.decode('utf-8').strip())
@@ -138,7 +163,7 @@ class TextureWorker(QtCore.QObject):
                 self.logSignal.emit("Failed to convert {} to .tex: {}".format(texture, e))
             return
 
-        # Otherwise, perform Arnold conversion using maketx.
+        # Otherwise, Arnold .tx conversion
         command = [
             arnold_path,
             '-v',
@@ -148,12 +173,14 @@ class TextureWorker(QtCore.QObject):
             '-d', bit_depth
         ] + compression_flag + ['--oiio', texture]
 
+        # If a color config is available, set up colorconvert (for srgb_texture / lin_srgb)
         if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
             command += ['--colorconfig', color_config]
             if color_space == 'lin_srgb':
                 command += ['--colorconvert', 'lin_srgb', 'ACES - ACEScg']
             elif color_space == 'srgb_texture':
                 command += ['--colorconvert', 'srgb_texture', 'ACES - ACEScg']
+            # 'raw' => no colorconvert
 
         self.logSignal.emit("Converting {} to Arnold .tx...".format(os.path.basename(texture)))
         try:
@@ -167,9 +194,9 @@ class TextureWorker(QtCore.QObject):
             self.logSignal.emit("Failed to convert {} to .tx: {}".format(texture, e))
 
 
-# -----------------------------------------------------------
+# -------------------------------------------------------------------
 # Main UI Class
-# -----------------------------------------------------------
+# -------------------------------------------------------------------
 class TxConverterUI(QtWidgets.QDialog):
     def __init__(self, parent=get_maya_main_window()):
         super(TxConverterUI, self).__init__(parent)
@@ -178,13 +205,11 @@ class TxConverterUI(QtWidgets.QDialog):
         self.setMinimumSize(400, 850)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setWindowOpacity(1.0)
-        self.setStyleSheet("background-color: #2D2D2D;")  # Opaque background
 
-        # Placeholders for worker thread and worker.
-        self.worker = None
-        self.worker_thread = None
+        # NEW: Accept drops for drag-and-drop
+        self.setAcceptDrops(True)
 
-        # Define colors
+        # Colors
         self.COLORS = {
             "background": "#2D2D2D",
             "surface": "#2B2B2B",
@@ -196,23 +221,32 @@ class TxConverterUI(QtWidgets.QDialog):
             "selection": "#3A3A3A",
             "menu_bg": "#363636"
         }
-        # Styles for the output info window.
-        self.normalOutputStyle = "background-color: {}; color: {}; border-radius: 4px; padding: 8px;".format(
-            self.COLORS["input_bg"], self.COLORS["text"])
-        self.completedOutputStyle = "background-color: #388E3C; color: white; border-radius: 4px; padding: 8px;"
+        self.normalOutputStyle = (
+            "background-color: {}; color: {}; border-radius: 4px; padding: 8px;"
+            .format(self.COLORS["input_bg"], self.COLORS["text"])
+        )
+        self.completedOutputStyle = (
+            "background-color: #388E3C; color: white; border-radius: 4px; padding: 8px;"
+        )
 
-        # Variables for moving/resizing the window
+        # For worker
+        self.worker = None
+        self.worker_thread = None
+
+        # Track drag-and-dropped textures
+        # If non-empty, only these dropped textures will be processed
+        self.dropped_files = []
+
         self.resize_margin = 25
         self._is_moving = False
         self._move_start_offset = QtCore.QPoint()
 
-        # Drop shadow effect for container
+        # Drop shadow effect
         self.shadow = QtWidgets.QGraphicsDropShadowEffect()
         self.shadow.setBlurRadius(20)
         self.shadow.setColor(QtGui.QColor(0, 0, 0, 150))
         self.shadow.setOffset(0, 0)
 
-        # Main Layout & Container
         main_layout = QtWidgets.QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(0)
@@ -227,7 +261,7 @@ class TxConverterUI(QtWidgets.QDialog):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
 
-        # Custom Title Bar
+        # Title Bar
         self.title_bar = QtWidgets.QWidget()
         self.title_bar.setFixedHeight(40)
         self.title_bar.setStyleSheet("background-color: {}; border-top-left-radius: 8px; border-top-right-radius: 8px;".format(self.COLORS["surface"]))
@@ -269,35 +303,12 @@ class TxConverterUI(QtWidgets.QDialog):
         self.title_bar.installEventFilter(self)
         container_layout.addWidget(self.title_bar)
 
-        # Scrollable Content Area
+        # Scrollable Content
         self.content_widget = QtWidgets.QWidget()
         self.content_widget.setStyleSheet("background-color: {};".format(self.COLORS["content_bg"]))
         content_layout = QtWidgets.QVBoxLayout(self.content_widget)
         content_layout.setContentsMargins(24, 16, 24, 16)
         content_layout.setSpacing(16)
-
-        # --- load_textures() method (restores output style to normal) ---
-        def load_textures_impl():
-            # When new textures are loaded, revert the output field style to normal.
-            self.output_field.setStyleSheet(self.normalOutputStyle)
-            folder_path = self.folder_line_edit.text().strip()
-            if not folder_path:
-                QtWidgets.QMessageBox.warning(self, "Warning", "No folder selected.")
-                return
-            recurse = self.include_subfolders_checkbox.isChecked()
-            textures = self.gather_textures(folder_path, recurse)
-            if not textures:
-                QtWidgets.QMessageBox.warning(self, "Warning", "No valid texture files found in the selected folder.")
-                return
-            texture_groups = defaultdict(lambda: defaultdict(list))
-            tif_srgb = self.tif_srgb_checkbox.isChecked()
-            for tex in textures:
-                ext = os.path.splitext(tex)[1].lower()
-                color_space, additional_options, _ = self.determine_color_space(tex, ext, tif_srgb)
-                texture_groups[color_space][ext].append(tex)
-            self.display_textures(texture_groups)
-        self.load_textures = load_textures_impl
-        # --- end load_textures() ---
 
         # Folder Selection
         folder_label = QtWidgets.QLabel("Select folder to load and group textures:")
@@ -307,8 +318,10 @@ class TxConverterUI(QtWidgets.QDialog):
         folder_layout = QtWidgets.QHBoxLayout()
         self.folder_line_edit = QtWidgets.QLineEdit()
         self.folder_line_edit.setPlaceholderText("Folder path")
-        self.folder_line_edit.setStyleSheet("background-color: {}; color: {}; border-radius: 4px; padding: 4px;".format(
-            self.COLORS["input_bg"], self.COLORS["text"]))
+        self.folder_line_edit.setStyleSheet(
+            "background-color: {}; color: {}; border-radius: 4px; padding: 4px;"
+            .format(self.COLORS["input_bg"], self.COLORS["text"])
+        )
         folder_layout.addWidget(self.folder_line_edit)
 
         choose_folder_btn = QtWidgets.QPushButton("Choose Folder")
@@ -318,7 +331,7 @@ class TxConverterUI(QtWidgets.QDialog):
         folder_layout.addWidget(choose_folder_btn)
         content_layout.addLayout(folder_layout)
 
-        # Include Subfolders Checkbox
+        # Include Subfolders
         self.include_subfolders_checkbox = QtWidgets.QCheckBox("Include Subfolders")
         self.include_subfolders_checkbox.setStyleSheet("color: {};".format(self.COLORS["text"]))
         self.include_subfolders_checkbox.setChecked(True)
@@ -338,7 +351,7 @@ class TxConverterUI(QtWidgets.QDialog):
         separator.setStyleSheet("color: {};".format(self.COLORS["surface"]))
         content_layout.addWidget(separator)
 
-        # Options Checkboxes
+        # Options
         self.compression_checkbox = QtWidgets.QCheckBox("Use DWA Compression")
         self.compression_checkbox.setStyleSheet("color: {};".format(self.COLORS["text"]))
         self.compression_checkbox.setChecked(True)
@@ -358,6 +371,12 @@ class TxConverterUI(QtWidgets.QDialog):
         self.rename_to_acescg_checkbox.setStyleSheet("color: {};".format(self.COLORS["text"]))
         self.rename_to_acescg_checkbox.setChecked(False)
         content_layout.addWidget(self.rename_to_acescg_checkbox)
+
+        # NEW: HDRI Checkbox (defaults off)
+        self.hdri_checkbox = QtWidgets.QCheckBox("HDRI (use 32-bit float for color textures)")
+        self.hdri_checkbox.setStyleSheet("color: {};".format(self.COLORS["text"]))
+        self.hdri_checkbox.setChecked(False)
+        content_layout.addWidget(self.hdri_checkbox)
 
         tif_label = QtWidgets.QLabel("TIF Color Space:")
         tif_label.setStyleSheet("color: {}; font-size: 12px;".format(self.COLORS["text"]))
@@ -382,7 +401,7 @@ class TxConverterUI(QtWidgets.QDialog):
 
         self.progressBar = QtWidgets.QProgressBar()
         self.progressBar.setMinimum(0)
-        self.progressBar.setMaximum(0)  # will be set when conversion starts
+        self.progressBar.setMaximum(0)  # will be set later
         content_layout.addWidget(self.progressBar)
 
         process_textures_btn = QtWidgets.QPushButton("Process Textures")
@@ -398,9 +417,33 @@ class TxConverterUI(QtWidgets.QDialog):
 
         self.log("TX Converter UI initialized.")
 
-    # ---------------------------
-    # Slot to append log messages (runs on main thread)
-    # ---------------------------
+    # -------------------------------------------------------------------
+    # DRAG & DROP IMPLEMENTATION
+    # -------------------------------------------------------------------
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        dropped_paths = []
+        for url in event.mimeData().urls():
+            file_path = url.toLocalFile()
+            if os.path.isfile(file_path):
+                dropped_paths.append(file_path)
+
+        if dropped_paths:
+            self.dropped_files = dropped_paths
+            self.output_field.setStyleSheet(self.normalOutputStyle)
+            self.output_field.clear()
+            self.log("Dropped {} file(s):".format(len(dropped_paths)))
+            for f in dropped_paths:
+                self.log("  " + f)
+            self.log("When you click 'Process Textures', only dropped files will be processed.")
+        event.acceptProposedAction()
+
+    # -------------------------------------------------------------------
+    # Logging and Progress UI Slots
+    # -------------------------------------------------------------------
     @QtCore.Slot(str)
     def appendLog(self, message):
         current = self.output_field.toPlainText()
@@ -409,59 +452,58 @@ class TxConverterUI(QtWidgets.QDialog):
         self.output_field.verticalScrollBar().setValue(self.output_field.verticalScrollBar().maximum())
         print(message)
 
-    # ---------------------------
-    # Slot to update progress bar
-    # ---------------------------
     @QtCore.Slot(int)
     def updateProgress(self, value):
         self.progressBar.setValue(value)
 
-    # ---------------------------
-    # Slot called when worker finishes conversion
-    # ---------------------------
     @QtCore.Slot()
     def workerFinished(self):
         self.appendLog("Conversion process completed.")
-        # Tint the output info window to a greenish tint.
         self.output_field.setStyleSheet(self.completedOutputStyle)
         self.worker_thread.quit()
         self.worker_thread.wait()
         self.worker = None
         self.worker_thread = None
 
-    # ---------------------------
-    # Event Filter for Title Bar (for window moving)
-    # ---------------------------
-    def eventFilter(self, obj, event):
-        if obj == self.title_bar:
-            if event.type() == QtCore.QEvent.MouseButtonPress:
-                if event.button() == QtCore.Qt.LeftButton:
-                    self._is_moving = True
-                    self._move_start_offset = event.globalPos() - self.frameGeometry().topLeft()
-                    return True
-            elif event.type() == QtCore.QEvent.MouseMove:
-                if self._is_moving:
-                    self.move(event.globalPos() - self._move_start_offset)
-                    return True
-            elif event.type() == QtCore.QEvent.MouseButtonRelease:
-                if event.button() == QtCore.Qt.LeftButton:
-                    self._is_moving = False
-                    return True
-        return super(TxConverterUI, self).eventFilter(obj, event)
-
-    # ---------------------------
-    # Logging Helper for main thread calls
-    # ---------------------------
     def log(self, message):
         self.appendLog(message)
 
-    # ---------------------------
-    # UI Callbacks
-    # ---------------------------
+    # -------------------------------------------------------------------
+    # Folder / Texture Gathering
+    # -------------------------------------------------------------------
     def choose_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
             self.folder_line_edit.setText(folder)
+
+    def load_textures(self):
+        # If we load a new folder, clear any dropped files
+        self.dropped_files = []
+
+        self.output_field.setStyleSheet(self.normalOutputStyle)
+        self.output_field.clear()
+
+        folder_path = self.folder_line_edit.text().strip()
+        if not folder_path:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No folder selected.")
+            return
+
+        recurse = self.include_subfolders_checkbox.isChecked()
+        textures = self.gather_textures(folder_path, recurse)
+        if not textures:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No valid texture files found in the selected folder.")
+            return
+
+        # Group them by color space
+        texture_groups = defaultdict(lambda: defaultdict(list))
+        tif_srgb = self.tif_srgb_checkbox.isChecked()
+
+        for tex in textures:
+            ext = os.path.splitext(tex)[1].lower()
+            color_space, additional_options, _ = self.determine_color_space(tex, ext, tif_srgb)
+            texture_groups[color_space][ext].append(tex)
+
+        self.display_textures(texture_groups)
 
     def gather_textures(self, folder_path, recurse=True):
         valid_exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.exr', '.bmp', '.gif')
@@ -499,6 +541,7 @@ class TxConverterUI(QtWidgets.QDialog):
         base_name = os.path.splitext(os.path.basename(filename))[0]
         base_lower = base_name.lower()
 
+        # If user already has a suffix
         if "_raw" in base_lower:
             new_name = re.sub(r'(\.[^.]+)$', '_raw\\1', filename)
             return 'raw', '-d float', new_name
@@ -509,6 +552,7 @@ class TxConverterUI(QtWidgets.QDialog):
             new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
             return 'lin_srgb', '', new_name
 
+        # Detect if it's typically "raw" data
         RAW_DATA_PATTERN = (
             r'_depth|_disp|_displacement|_zdisp|_normal|_nrm|_norm|_n(?![a-z])|_mask|_rough|_metal'
             r'|_gloss|_spec|_ao|_cavity|_bump|_height|_opacity|_roughness|_r(?![a-z])|_roughnes'
@@ -518,6 +562,7 @@ class TxConverterUI(QtWidgets.QDialog):
             new_name = re.sub(r'(\.[^.]+)$', '_raw\\1', filename)
             return 'raw', '-d float', new_name
 
+        # If EXR or TIF, guess linear or sRGB
         if extension == '.exr':
             new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
             return 'lin_srgb', '', new_name
@@ -529,10 +574,17 @@ class TxConverterUI(QtWidgets.QDialog):
                 new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
                 return 'lin_srgb', '', new_name
 
+        # Default assumption: sRGB texture
         new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
         return 'srgb_texture', '', new_name
 
+    # -------------------------------------------------------------------
+    # RENAME HELPERS
+    # -------------------------------------------------------------------
     def rename_files(self, folder_path, add_suffix=False, recurse=True):
+        """
+        Renames folder-based textures if 'Add missing color space suffix' is checked.
+        """
         renamed_files = []
         skipped_files = []
         valid_exts = ('.exr', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif')
@@ -552,7 +604,9 @@ class TxConverterUI(QtWidgets.QDialog):
                 skipped_files.append(file_path)
                 continue
 
-            color_space, _, new_name = self.determine_color_space(file_path, extension, self.tif_srgb_checkbox.isChecked())
+            color_space, _, new_name = self.determine_color_space(
+                file_path, extension, self.tif_srgb_checkbox.isChecked()
+            )
             if color_space not in ['raw', 'srgb_texture', 'lin_srgb']:
                 skipped_files.append(file_path)
                 continue
@@ -579,20 +633,89 @@ class TxConverterUI(QtWidgets.QDialog):
         self.log("Skipped {} files.".format(len(skipped_files)))
         return renamed_files
 
+    # NEW: rename_dropped_files helper
+    def rename_dropped_files(self, file_list):
+        """
+        Renames each dropped file if it lacks a _raw / _srgb_texture / _lin_srgb suffix,
+        then returns the updated paths so we can process them properly afterward.
+        """
+        renamed_files = []
+        skipped_files = []
+        updated_paths = []
+        valid_exts = ('.exr', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif')
+
+        for file_path in file_list:
+            extension = os.path.splitext(file_path)[1].lower()
+            if extension not in valid_exts:
+                skipped_files.append(file_path)
+                updated_paths.append(file_path)
+                continue
+
+            color_space, _, _ = self.determine_color_space(
+                file_path, extension, self.tif_srgb_checkbox.isChecked()
+            )
+            if color_space not in ['raw', 'srgb_texture', 'lin_srgb']:
+                skipped_files.append(file_path)
+                updated_paths.append(file_path)
+                continue
+
+            base, ext = os.path.splitext(os.path.basename(file_path))
+            # If there's already a suffix, skip
+            if any(suf in base.lower() for suf in ['_raw','_srgb_texture','_lin_srgb']):
+                skipped_files.append(file_path)
+                updated_paths.append(file_path)
+            else:
+                new_file_name = f"{base}_{color_space}{ext}"
+                new_path = os.path.join(os.path.dirname(file_path), new_file_name)
+                try:
+                    os.rename(file_path, new_path)
+                    renamed_files.append((file_path, new_path))
+                    updated_paths.append(new_path)
+                except Exception as e:
+                    self.log(f"Error renaming {file_path}: {e}")
+                    updated_paths.append(file_path)
+
+        self.log(f"Renamed {len(renamed_files)} dropped files.")
+        for old, new in renamed_files:
+            self.log(f"  {old} -> {new}")
+        self.log(f"Skipped {len(skipped_files)} dropped files.")
+        return updated_paths
+
+    # -------------------------------------------------------------------
+    # PROCESS TEXTURES
+    # -------------------------------------------------------------------
     def process_textures(self):
-        folder_path = self.folder_line_edit.text().strip()
-        if not folder_path:
-            QtWidgets.QMessageBox.warning(self, "Warning", "No folder path found.")
-            return
+        """
+        Main entry point for processing. If the user has drag-and-dropped any files,
+        we'll only process those. Otherwise, we'll gather from the folder.
+        """
+        # If user dropped files, use them. Otherwise gather from folder.
+        if self.dropped_files:
+            self.log("Processing dropped file(s) only...")
 
-        add_suffix_selected = self.add_suffix_checkbox.isChecked()
-        recurse = self.include_subfolders_checkbox.isChecked()
+            # If "Add missing suffix" is checked, rename the dropped files in place
+            if self.add_suffix_checkbox.isChecked():
+                self.log("Adding missing color space suffixes to dropped file(s)...")
+                self.dropped_files = self.rename_dropped_files(self.dropped_files)
 
-        if add_suffix_selected:
-            self.log("Adding missing color space suffixes...")
-            self.rename_files(folder_path, add_suffix=add_suffix_selected, recurse=recurse)
+            textures = self.dropped_files
+        else:
+            folder_path = self.folder_line_edit.text().strip()
+            if not folder_path:
+                QtWidgets.QMessageBox.warning(self, "Warning", "No folder path found.")
+                return
 
-        textures = self.gather_textures(folder_path, recurse=recurse)
+            add_suffix_selected = self.add_suffix_checkbox.isChecked()
+            recurse = self.include_subfolders_checkbox.isChecked()
+
+            # Folder-based rename if needed
+            if add_suffix_selected:
+                self.log("Adding missing color space suffixes...")
+                self.rename_files(folder_path, add_suffix=add_suffix_selected, recurse=recurse)
+
+            # Gather folder textures after rename
+            textures = self.gather_textures(folder_path, recurse=recurse)
+
         self.log("Total textures found: {}".format(len(textures)))
 
         selected_textures = []
@@ -614,7 +737,10 @@ class TxConverterUI(QtWidgets.QDialog):
 
         total = len(selected_textures)
         if total == 0:
-            QtWidgets.QMessageBox.warning(self, "Warning", "No textures matched the recognized color spaces for processing.")
+            QtWidgets.QMessageBox.warning(
+                self, "Warning",
+                "No textures matched recognized color spaces for processing."
+            )
             return
 
         self.progressBar.setMaximum(total)
@@ -624,10 +750,18 @@ class TxConverterUI(QtWidgets.QDialog):
         rename_to_acescg = self.rename_to_acescg_checkbox.isChecked()
         use_compression = self.compression_checkbox.isChecked()
         use_renderman = self.renderman_checkbox.isChecked()
+        hdri_mode = self.hdri_checkbox.isChecked()
 
-        # Set up the worker thread.
+        # Set up the worker thread
         self.worker_thread = QtCore.QThread()
-        self.worker = TextureWorker(selected_textures, rename_to_acescg, add_suffix_selected, use_compression, use_renderman)
+        self.worker = TextureWorker(
+            selected_textures,
+            rename_to_acescg,
+            self.add_suffix_checkbox.isChecked(),
+            use_compression,
+            use_renderman,
+            hdri_mode=hdri_mode
+        )
         self.worker.moveToThread(self.worker_thread)
         self.worker.logSignal.connect(self.appendLog)
         self.worker.progressSignal.connect(self.updateProgress)
@@ -635,9 +769,26 @@ class TxConverterUI(QtWidgets.QDialog):
         self.worker_thread.started.connect(self.worker.run)
         self.worker_thread.start()
 
-    # ---------------------------
-    # Frameless Window Resizing & Mouse Interactions
-    # ---------------------------
+    # -------------------------------------------------------------------
+    # Frameless Window Move/Resize Handling
+    # -------------------------------------------------------------------
+    def eventFilter(self, obj, event):
+        if obj == self.title_bar:
+            if event.type() == QtCore.QEvent.MouseButtonPress:
+                if event.button() == QtCore.Qt.LeftButton:
+                    self._is_moving = True
+                    self._move_start_offset = event.globalPos() - self.frameGeometry().topLeft()
+                    return True
+            elif event.type() == QtCore.QEvent.MouseMove:
+                if self._is_moving:
+                    self.move(event.globalPos() - self._move_start_offset)
+                    return True
+            elif event.type() == QtCore.QEvent.MouseButtonRelease:
+                if event.button() == QtCore.Qt.LeftButton:
+                    self._is_moving = False
+                    return True
+        return super(TxConverterUI, self).eventFilter(obj, event)
+
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
             pos = event.pos()
@@ -651,7 +802,7 @@ class TxConverterUI(QtWidgets.QDialog):
 
     def mouseMoveEvent(self, event):
         if event.buttons() & QtCore.Qt.LeftButton:
-            if self._is_resizing:
+            if getattr(self, "_is_resizing", False):
                 delta = event.globalPos() - self._resize_start_pos
                 new_geo = QtCore.QRect(self._resize_start_geo)
                 new_geo.setWidth(max(self.minimumWidth(), self._resize_start_geo.width() + delta.x()))
@@ -666,7 +817,7 @@ class TxConverterUI(QtWidgets.QDialog):
 
     def mouseReleaseEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
-            self._is_resizing = False
+            setattr(self, "_is_resizing", False)
             self.unsetCursor()
         event.accept()
 
@@ -677,9 +828,10 @@ class TxConverterUI(QtWidgets.QDialog):
         else:
             self.unsetCursor()
 
-# -----------------------------------------------------------
-# Function to Show the TX Converter UI in Maya
-# -----------------------------------------------------------
+
+# -------------------------------------------------------------------
+# Show the UI in Maya
+# -------------------------------------------------------------------
 def show_tx_converter():
     global tx_converter_dialog
     try:
@@ -695,8 +847,7 @@ def show_tx_converter():
     tx_converter_dialog.raise_()
     tx_converter_dialog.activateWindow()
 
-# -----------------------------------------------------------
-# Run the UI (either from Maya’s Script Editor or as a standalone script)
-# -----------------------------------------------------------
+
+# For testing / direct execution
 if __name__ == "__main__":
     show_tx_converter()
