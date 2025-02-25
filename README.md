@@ -1,14 +1,29 @@
 # TX Converter
  Converts textures to arnold tx and renderman tex.
  
- Renames files if desired.
+Features
+ - Convert entire folders and subfolders
+ - Multithreaded conversion
+ - Simultaneous Multi texture conversion
+ - Drag and drop
+ - DWAA Compression
+ - Adding Missing color space suffix to original and tx/tex
+ - Adding color space Acescg to tx/tex to acescg
+ - Renderman Bump Rough support
+ - HDRI checkbox
+ - Automatic color space detection
+ - Acescg 1.3 and Acescg 1.0.3 support
+ - Texture Color space preview
 
+Env Vars
+
+ set RMANTREE = path/to/RenderManForMaya-26.3/
+ 
  set MAKETX_PATH = path/to/arnold/maketx.exe 
  
  set OCIO = path/to/config.ocio
  
-TODO:
-Fixing some kinks with Tifs
+
 
 ```
 import tx_converter
