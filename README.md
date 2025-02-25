@@ -13,6 +13,7 @@ Features
  - HDRI checkbox
  - Automatic color space detection
  - Acescg 1.3 and Acescg 1.0.3 support
+ - Texture Color space preview
 
  How to compile:
  Pyside 6 is required
