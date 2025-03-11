@@ -66,10 +66,8 @@ def detect_aces_version(config_path):
                     break
                 check = line.strip().lower()
 
-                # If we see any 1.3 marker, return "1.3" right away
                 if any(m.lower() in check for m in version_13_markers):
                     return "1.3"
-                # If we see any 1.0.3 marker, guess "1.0.3"
                 if any(m.lower() in check for m in version_10_markers):
                     return "1.0.3"
     except:
@@ -82,9 +80,10 @@ def detect_aces_version(config_path):
 # Worker Class for Texture Conversion
 # -----------------------------------------------------------
 class TextureWorker(QtCore.QObject):
-    progressSignal = QtCore.Signal(int)  # emits the number of textures processed so far
-    logSignal = QtCore.Signal(str)       # emits log messages
-    finishedSignal = QtCore.Signal()     # emitted when all conversions are done
+    # Signals to communicate with the UI (delivered on the main thread)
+    progressSignal = QtCore.Signal(int)  
+    logSignal = QtCore.Signal(str)       
+    finishedSignal = QtCore.Signal()     
 
     def __init__(
         self,
@@ -139,11 +138,11 @@ class TextureWorker(QtCore.QObject):
     def convert_texture(self, texture, color_space, additional_options):
         self.logSignal.emit("Starting conversion for {}...".format(os.path.basename(texture)))
         arnold_path = os.environ.get("MAKETX_PATH", "maketx")
-        color_config = os.environ.get("OCIO", "")
+        color_config = os.environ.get("OCIO", "")  # We rely on "OCIO" by default here
         renderman_path = os.environ.get("RMANTREE", "")
         txmake_path = os.path.join(renderman_path, "bin", "txmake") if renderman_path else None
 
-        # Detect ACES version if user has an .ocio config
+        # Detect ACES version
         aces_version = detect_aces_version(color_config)
 
         output_folder = os.path.dirname(texture)
@@ -155,18 +154,20 @@ class TextureWorker(QtCore.QObject):
 
         # rename_to_acescg => remove old suffix => add "_acescg"
         if self.rename_to_acescg:
-            base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb)$', '', base_name, flags=re.IGNORECASE)
+            # Now also remove _acescg if present
+            base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb|_acescg)$', '', base_name, flags=re.IGNORECASE)
             suffix = "_acescg"
         else:
             if self.add_suffix_selected:
-                if not re.search(r'(_raw|_srgb_texture|_lin_srgb)$', base_name, re.IGNORECASE):
+                # If no recognized suffix => add
+                if not re.search(r'(_raw|_srgb_texture|_lin_srgb|_acescg)$', base_name, re.IGNORECASE):
                     suffix = f"_{color_space}"
                 else:
                     suffix = ""
             else:
                 suffix = ""
 
-        # Check for displacement / bump / normal
+        # Check if displacement / bump / normal
         is_displacement = re.search(r'_disp|_displacement|_zdisp', base_name, re.IGNORECASE)
         is_bump = re.search(r'_bump|_height', base_name, re.IGNORECASE)
         is_normal = re.search(r'_normal|_nrm|_norm(?=[^a-z])', base_name, re.IGNORECASE)
@@ -175,6 +176,7 @@ class TextureWorker(QtCore.QObject):
         if is_displacement:
             bit_depth = 'float'
         else:
+            # If HDRI mode => float if color_space != 'raw' (including acescg)
             if self.hdri_mode and color_space != 'raw':
                 bit_depth = 'float'
             else:
@@ -185,34 +187,25 @@ class TextureWorker(QtCore.QObject):
                 else:
                     bit_depth = 'uint16'
 
-        # RENDERMAN BRANCH
+        # RENDERMAN path
         if self.use_renderman and txmake_path:
             self.logSignal.emit("Converting {} to RenderMan .tex...".format(os.path.basename(texture)))
 
             out_base = base_name + suffix
-            tx_cmd = [txmake_path]
+            tx_cmd = [txmake_path, "-format", "openexr"]
 
-            # Force EXR
-            tx_cmd += ["-format", "openexr"]
-
-            # If "Use DWA Compression" is on => e.g. -compression zip
             if self.use_compression:
                 tx_cmd += ["-compression", "zip"]
 
-            # half or float
-            if bit_depth == "half":
+            if bit_depth == 'half':
                 tx_cmd += ["-half"]
-            elif bit_depth == "float":
+            elif bit_depth == 'float':
                 tx_cmd += ["-float"]
 
-            # example resizing & wrap mode
             tx_cmd += ["-resize", "round-", "-mode", "periodic"]
 
-            # color convert if not raw
-            if color_space != "raw" and color_config:
-                # If ACES v1.3 => e.g. "sRGB - Texture" or "Linear Rec.709 (sRGB)"
-                # If ACES v1.0.3 => might just do color_space
-                # We'll do the same logic as Arnold
+            # color_space != 'raw'/'acescg' => colorconvert
+            if color_space not in ["raw", "acescg"] and color_config:
                 if color_space == "lin_srgb":
                     if aces_version == "1.3":
                         tx_cmd += ["-ocioconvert", "Linear Rec.709 (sRGB)", "ACEScg"]
@@ -224,7 +217,7 @@ class TextureWorker(QtCore.QObject):
                     else:
                         tx_cmd += ["-ocioconvert", "srgb_texture", "ACES - ACEScg"]
 
-            # If user wants bump-rough, and it's bump or normal => produce .b2r
+            # Bump-rough
             if self.use_renderman_bumprough and (is_bump or is_normal):
                 out_ext = ".b2r"
                 out_file = os.path.join(output_folder, out_base + out_ext)
@@ -240,64 +233,65 @@ class TextureWorker(QtCore.QObject):
 
             self.logSignal.emit("txmake command: " + " ".join(tx_cmd))
             try:
-                result = subprocess.run(tx_cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                result = subprocess.run(tx_cmd, shell=False,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 out_msg = result.stdout.decode('utf-8').strip()
                 err_msg = result.stderr.decode('utf-8').strip()
                 self.logSignal.emit("txmake output: " + out_msg)
                 if err_msg:
                     self.logSignal.emit("txmake errors: " + err_msg)
-                self.logSignal.emit("Converted to {}: {} -> {}".format(out_ext, texture, out_file))
+                self.logSignal.emit(f"Converted to {out_ext}: {texture} -> {out_file}")
             except subprocess.CalledProcessError as e:
                 self.logSignal.emit("Failed to convert {} to .tex: {}".format(texture, e))
             return
 
-        # ARNOLD BRANCH
-        arnold_output_path = os.path.join(output_folder, f"{base_name}{suffix}.tx")
-        compression_flag = []
+        # ARNOLD path
+        arnold_out = os.path.join(output_folder, f"{base_name}{suffix}.tx")
+        comp_flag = []
         if self.use_compression and not is_displacement:
-            compression_flag = ['--compression', 'dwaa']
+            comp_flag = ['--compression', 'dwaa']
 
-        command = [
+        cmd = [
             arnold_path,
             '-v',
-            '-o', arnold_output_path,
+            '-o', arnold_out,
             '-u',
             '--format', 'exr',
             '-d', bit_depth
-        ] + compression_flag + ['--oiio', texture]
+        ] + comp_flag + ['--oiio', texture]
 
-        if color_space in ['lin_srgb', 'srgb_texture', 'raw'] and color_config:
-            command += ['--colorconfig', color_config]
+        # color_space in ["lin_srgb","srgb_texture","raw","acescg"] => if raw/acescg => skip colorconvert
+        if color_space not in ["raw", "acescg"] and color_config:
+            cmd += ['--colorconfig', color_config]
             if color_space == 'lin_srgb':
                 if aces_version == "1.3":
-                    # e.g. "Linear Rec.709 (sRGB)" => "ACEScg"
-                    command += ["--colorconvert", "Linear Rec.709 (sRGB)", "ACEScg"]
+                    cmd += ["--colorconvert", "Linear Rec.709 (sRGB)", "ACEScg"]
                 else:
-                    command += ["--colorconvert", "lin_srgb", "ACES - ACEScg"]
+                    cmd += ["--colorconvert", "lin_srgb", "ACES - ACEScg"]
             elif color_space == 'srgb_texture':
                 if aces_version == "1.3":
-                    command += ["--colorconvert", "sRGB - Texture", "ACEScg"]
+                    cmd += ["--colorconvert", "sRGB - Texture", "ACEScg"]
                 else:
-                    command += ["--colorconvert", "srgb_texture", "ACES - ACEScg"]
-            # raw => no colorconvert
+                    cmd += ["--colorconvert", "srgb_texture", "ACES - ACEScg"]
+            # raw or acescg => no colorconvert
 
-        self.logSignal.emit("Converting {} to Arnold .tx...".format(os.path.basename(texture)))
+        self.logSignal.emit(f"Converting {os.path.basename(texture)} to Arnold .tx...")
         try:
-            result = subprocess.run(command, shell=True,
+            result = subprocess.run(cmd, shell=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.logSignal.emit("maketx output: " + result.stdout.decode('utf-8').strip())
             if result.stderr:
                 self.logSignal.emit("maketx errors: " + result.stderr.decode('utf-8').strip())
-            self.logSignal.emit("Converted: {} -> {}".format(texture, arnold_output_path))
+            self.logSignal.emit(f"Converted: {texture} -> {arnold_out}")
         except subprocess.CalledProcessError as e:
-            self.logSignal.emit("Failed to convert {} to .tx: {}".format(texture, e))
+            self.logSignal.emit(f"Failed to convert {texture} to .tx: {e}")
 
 
 # -----------------------------------------------------------
 # Main UI Class
 # -----------------------------------------------------------
 class TxConverterUI(QtWidgets.QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=get_maya_main_window()):
         super(TxConverterUI, self).__init__(parent)
         self.setWindowTitle("TX Converter")
         self.setGeometry(100, 100, 600, 700)
@@ -357,8 +351,7 @@ class TxConverterUI(QtWidgets.QDialog):
         self.title_bar = QtWidgets.QWidget()
         self.title_bar.setFixedHeight(40)
         self.title_bar.setStyleSheet(
-            f"background-color: {self.COLORS['surface']}; "
-            "border-top-left-radius: 8px; border-top-right-radius: 8px;"
+            f"background-color: {self.COLORS['surface']}; border-top-left-radius: 8px; border-top-right-radius: 8px;"
         )
         title_bar_layout = QtWidgets.QHBoxLayout(self.title_bar)
         title_bar_layout.setContentsMargins(16, 0, 8, 0)
@@ -404,7 +397,6 @@ class TxConverterUI(QtWidgets.QDialog):
         content_layout.setContentsMargins(24, 16, 24, 16)
         content_layout.setSpacing(16)
 
-        # Folder selection
         folder_label = QtWidgets.QLabel("Select folder to load and group textures:")
         folder_label.setStyleSheet(f"color: {self.COLORS['text']}; font-size: 12px;")
         content_layout.addWidget(folder_label)
@@ -413,8 +405,7 @@ class TxConverterUI(QtWidgets.QDialog):
         self.folder_line_edit = QtWidgets.QLineEdit()
         self.folder_line_edit.setPlaceholderText("Folder path")
         self.folder_line_edit.setStyleSheet(
-            f"background-color: {self.COLORS['input_bg']}; color: {self.COLORS['text']}; "
-            "border-radius: 4px; padding: 4px;"
+            f"background-color: {self.COLORS['input_bg']}; color: {self.COLORS['text']}; border-radius: 4px; padding: 4px;"
         )
         folder_layout.addWidget(self.folder_line_edit)
 
@@ -466,7 +457,6 @@ class TxConverterUI(QtWidgets.QDialog):
         self.rename_to_acescg_checkbox.setChecked(False)
         content_layout.addWidget(self.rename_to_acescg_checkbox)
 
-        # Bump Rough for .b2r
         self.renderman_bumprough_checkbox = QtWidgets.QCheckBox("Use Renderman Bump Rough")
         self.renderman_bumprough_checkbox.setStyleSheet(f"color: {self.COLORS['text']};")
         self.renderman_bumprough_checkbox.setChecked(False)
@@ -603,6 +593,7 @@ class TxConverterUI(QtWidgets.QDialog):
             for root, _, files in os.walk(folder_path):
                 for file in files:
                     f_lower = file.lower()
+                    # also skip .b2r
                     if f_lower.endswith(valid_exts) and not f_lower.endswith(('.tex', '.tx', '.b2r')):
                         textures.append(os.path.join(root, file))
         else:
@@ -631,6 +622,10 @@ class TxConverterUI(QtWidgets.QDialog):
     def determine_color_space(self, filename, extension, tif_srgb):
         base_name = os.path.splitext(os.path.basename(filename))[0]
         base_lower = base_name.lower()
+
+        # 1) If we see "_acescg", treat as "acescg"
+        if "_acescg" in base_lower:
+            return 'acescg', '', filename
 
         if "_raw" in base_lower:
             return 'raw', '-d float', filename
@@ -681,15 +676,17 @@ class TxConverterUI(QtWidgets.QDialog):
             color_space, _, _ = self.determine_color_space(
                 file_path, extension, self.tif_srgb_checkbox.isChecked()
             )
-            if color_space not in ['raw', 'srgb_texture', 'lin_srgb']:
+            # now includes 'acescg'
+            if color_space not in ['raw', 'srgb_texture', 'lin_srgb', 'acescg']:
                 skipped.append(file_path)
                 continue
 
             if add_suffix:
                 base, ext = os.path.splitext(os.path.basename(file_path))
-                suffixes = ['_raw', '_srgb_texture', '_lin_srgb']
+                # also include '_acescg'
+                suffixes = ['_raw', '_srgb_texture', '_lin_srgb', '_acescg']
                 if not any(suf in base.lower() for suf in suffixes):
-                    new_file_name = f"{base}_{color_space}{ext}"
+                    new_file_name = base + f"_{color_space}" + ext
                     new_path = os.path.join(os.path.dirname(file_path), new_file_name)
                     try:
                         os.rename(file_path, new_path)
@@ -712,6 +709,7 @@ class TxConverterUI(QtWidgets.QDialog):
         skipped = []
         updated = []
         valid_exts = ('.exr', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif')
+
         for fp in file_list:
             extension = os.path.splitext(fp)[1].lower()
             if extension not in valid_exts:
@@ -719,14 +717,17 @@ class TxConverterUI(QtWidgets.QDialog):
                 updated.append(fp)
                 continue
 
-            color_space, _, _ = self.determine_color_space(fp, extension, self.tif_srgb_checkbox.isChecked())
-            if color_space not in ['raw', 'srgb_texture', 'lin_srgb']:
+            color_space, _, _ = self.determine_color_space(
+                fp, extension, self.tif_srgb_checkbox.isChecked()
+            )
+            # also add 'acescg'
+            if color_space not in ['raw', 'srgb_texture', 'lin_srgb', 'acescg']:
                 skipped.append(fp)
                 updated.append(fp)
                 continue
 
             base, ext = os.path.splitext(os.path.basename(fp))
-            if any(suf in base.lower() for suf in ['_raw','_srgb_texture','_lin_srgb']):
+            if any(suf in base.lower() for suf in ['_raw','_srgb_texture','_lin_srgb','_acescg']):
                 skipped.append(fp)
                 updated.append(fp)
             else:
@@ -777,31 +778,33 @@ class TxConverterUI(QtWidgets.QDialog):
         for tex in textures:
             extension = os.path.splitext(tex)[1].lower()
             color_space, additional_options, _ = self.determine_color_space(tex, extension, tif_srgb)
-            if color_space in ["lin_srgb", "srgb_texture", "raw"]:
+            # now includes 'acescg'
+            if color_space in ["lin_srgb", "srgb_texture", "raw", "acescg"]:
                 selected_textures.append((tex, color_space, additional_options))
             else:
                 skipped_textures.append(tex)
 
         if skipped_textures:
-            self.log("Skipped textures (unrecognized color space): {}".format(len(skipped_textures)))
+            self.log(f"Skipped textures (unrecognized color space): {len(skipped_textures)}")
             for st in skipped_textures:
                 self.log("  " + st)
 
         total = len(selected_textures)
         if total == 0:
-            QtWidgets.QMessageBox.warning(self, "Warning", "No textures matched recognized color spaces for processing.")
+            QtWidgets.QMessageBox.warning(
+                self, "Warning",
+                "No textures matched the recognized color spaces for processing."
+            )
             return
 
         self.progressBar.setMaximum(total)
         self.progressBar.setValue(0)
-        self.log("Starting conversion of {} textures...".format(total))
+        self.log(f"Starting conversion of {total} textures...")
 
         rename_to_acescg = self.rename_to_acescg_checkbox.isChecked()
         use_compression = self.compression_checkbox.isChecked()
         use_renderman = self.renderman_checkbox.isChecked()
         hdri_mode = self.hdri_checkbox.isChecked()
-
-        # param for bump rough
         use_renderman_bumprough = self.renderman_bumprough_checkbox.isChecked()
 
         self.worker_thread = QtCore.QThread()
@@ -894,6 +897,7 @@ def show_tx_converter():
     tx_converter_dialog.show()
     tx_converter_dialog.raise_()
     tx_converter_dialog.activateWindow()
+
 
 if __name__ == "__main__":
     show_tx_converter()
