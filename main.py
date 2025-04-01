@@ -226,7 +226,7 @@ class TextureWorker(QtCore.QObject):
                 else:
                     tx_cmd += ["-bumprough", "2", "0", "0", "0", "0", "1"]
             else:
-                out_ext = ".tex"
+                out_ext = f".{ext}.tex"
                 out_file = os.path.join(output_folder, out_base + out_ext)
 
             tx_cmd += [texture, out_file]
