@@ -587,37 +587,58 @@ class TxConverterUI(QtWidgets.QDialog):
         self.log(f"Loaded {total_textures} textures.")
 
     def determine_color_space(self, filename, extension, tif_srgb):
+        """
+        Determine the color space based on specific suffixes and patterns in the base filename,
+        or by file extension if no suffix is present.
+
+        New additions:
+        - We added more "raw" keywords (SPCR, BMP, BUMP, HIGHT, DISP, ROUGH, EMM, EMISSION, SPEC, NORM, NORMAL)
+            to the raw data pattern.
+        - 'RGB.exr' or any .exr remains lin_srgb if not otherwise tagged.
+        - If no recognized suffix or pattern is found, we default to srgb_texture.
+        """
+
         base_name = os.path.splitext(os.path.basename(filename))[0]
         base_lower = base_name.lower()
 
-        # If suffix is _acescg => color space is "acescg" (no transform)
+        # 1) If we see "_acescg", it's color space "acescg" (no transform)
         if "_acescg" in base_lower:
             new_name = re.sub(r'(\.[^.]+)$', '_acescg\\1', filename)
             return 'acescg', '', new_name
 
+        # 2) If we see "_raw", it's raw data
         if "_raw" in base_lower:
             new_name = re.sub(r'(\.[^.]+)$', '_raw\\1', filename)
             return 'raw', '-d float', new_name
+
+        # 3) If we see "_srgb_texture", it's srgb_texture
         elif "_srgb_texture" in base_lower:
             new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
             return 'srgb_texture', '', new_name
+
+        # 4) If we see "_lin_srgb", it's lin_srgb
         elif "_lin_srgb" in base_lower:
             new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
             return 'lin_srgb', '', new_name
 
-        # If it's in the raw data pattern => "raw"
+        # 5) "Raw" data pattern expanded with user-requested tokens:
+        #    spcr, bmp, bump, hight, disp, rough, emm, emission, spec, norm, normal
         RAW_DATA_PATTERN = (
             r'_depth|_disp|_displacement|_zdisp|_normal|_nrm|_norm|_n(?![a-z])|_mask'
             r'|_rough|_metal|_gloss|_spec|_ao|_cavity|_bump|_height|_opacity'
             r'|_roughness|_r(?![a-z])|_roughnes|_specularity|_specs|_metalness|_metalnes'
+            r'|spcr|bmp|bump|hight|disp|rough|emm|emission|spec|norm|normal'
         )
         if re.search(RAW_DATA_PATTERN, base_lower):
             new_name = re.sub(r'(\.[^.]+)$', '_raw\\1', filename)
             return 'raw', '-d float', new_name
 
+        # 6) If extension == .exr => lin_srgb
         if extension == '.exr':
             new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
             return 'lin_srgb', '', new_name
+
+        # 7) If extension in .tif/.tiff => either srgb_texture or lin_srgb depending on user checkbox
         elif extension in ['.tif', '.tiff']:
             if tif_srgb:
                 new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
@@ -626,8 +647,10 @@ class TxConverterUI(QtWidgets.QDialog):
                 new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
                 return 'lin_srgb', '', new_name
 
+        # 8) Fallback => srgb_texture
         new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
         return 'srgb_texture', '', new_name
+
 
     def rename_files(self, folder_path, add_suffix=False, recurse=True):
         renamed_files = []
