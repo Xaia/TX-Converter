@@ -589,7 +589,7 @@ class TxConverterUI(QtWidgets.QDialog):
     def determine_color_space(self, filename, extension, tif_srgb):
         """
         Determine the color space based on specific suffixes and patterns in the base filename,
-        or by file extension if no suffix is present.
+        or by file extension if no suffix is present...
 
         New additions:
         - We added more "raw" keywords (SPCR, BMP, BUMP, HIGHT, DISP, ROUGH, EMM, EMISSION, SPEC, NORM, NORMAL)
