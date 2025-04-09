@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import subprocess
+import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -62,7 +63,8 @@ class TextureWorker(QtCore.QObject):
         use_renderman,
         hdri_mode=False,
         parent=None,
-        use_renderman_bumprough=False
+        use_renderman_bumprough=False,
+        userSettings=None  # NEW: pass userSettings dict
     ):
         super(TextureWorker, self).__init__(parent)
         self.textures = textures
@@ -72,15 +74,21 @@ class TextureWorker(QtCore.QObject):
         self.use_renderman = use_renderman
         self.hdri_mode = hdri_mode
         self.use_renderman_bumprough = use_renderman_bumprough
+        # New: read batch_size from userSettings, or default to 6
+        if userSettings and "batch_size" in userSettings:
+            self.batch_size = int(userSettings["batch_size"])
+        else:
+            self.batch_size = 6
 
     def run(self):
         total = len(self.textures)
-        batch_size = 6
+
         processed = 0
 
-        for i in range(0, total, batch_size):
-            batch = self.textures[i : i + batch_size]
-            with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        # Use self.batch_size from user settings, not a hardcoded 6
+        for i in range(0, total, self.batch_size):
+            batch = self.textures[i : i + self.batch_size]
+            with ThreadPoolExecutor(max_workers=self.batch_size) as executor:
                 futures = {
                     executor.submit(self.convert_texture, tex, cs, opts): (tex, cs)
                     for (tex, cs, opts) in batch
@@ -263,6 +271,8 @@ class TxConverterUI(QtWidgets.QDialog):
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setWindowOpacity(1.0)
         self.setStyleSheet("background-color: #2D2D2D;")
+                # NEW: Load user settings from JSON
+        self.userSettings = self.load_user_settings()
 
         self.worker = None
         self.worker_thread = None
@@ -344,6 +354,14 @@ class TxConverterUI(QtWidgets.QDialog):
         self.minimize_button.setObjectName("minimize")
         self.minimize_button.setStyleSheet(control_style)
         self.minimize_button.clicked.connect(self.showMinimized)
+
+                # Add "Settings" button in Title Bar (small) to the right of minimize_button
+        self.settings_button = QtWidgets.QPushButton("⚙")
+        self.settings_button.setObjectName("settings")
+        self.settings_button.setStyleSheet(control_style)
+        self.settings_button.setFixedSize(32, 32)
+        self.settings_button.clicked.connect(self.open_settings_dialog)
+        title_bar_layout.addWidget(self.settings_button)  # after minimize_button
 
         self.close_button = QtWidgets.QPushButton("×")
         self.close_button.setObjectName("close")
@@ -472,6 +490,165 @@ class TxConverterUI(QtWidgets.QDialog):
 
         self.log("TX Converter UI initialized.")
 
+    # ---------- New JSON-based persistent settings ------------
+    def load_user_settings(self):
+        """
+        Load user settings from 'txconverter_settings.json' if it exists,
+        else return a default dictionary.
+        """
+        default = {
+            "batch_size": 6,
+            "patterns": {
+                "raw": "_raw",
+                "lin_srgb": "_lin_srgb",
+                "acescg": "_acescg",
+                "srgb_texture": "_srgb_texture"
+            }
+        }
+        settings_path = os.path.join(os.path.dirname(__file__), "txconverter_settings.json")
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data
+            except:
+                return default
+        return default
+
+    def save_user_settings(self):
+        """
+        Save user settings to 'txconverter_settings.json'.
+        """
+        settings_path = os.path.join(os.path.dirname(__file__), "txconverter_settings.json")
+        try:
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(self.userSettings, f, indent=4)
+        except Exception as e:
+            self.log(f"Error saving settings: {e}")
+
+    # ------------------ open_settings_dialog ------------------
+    def open_settings_dialog(self):
+        """
+        Opens a QDialog so the user can:
+        - Change batch_size
+        - Change the single-string color space suffix patterns
+        - Enter multiple custom substrings (comma-separated) for each color space
+        """
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Settings")
+        dlg.setWindowModality(QtCore.Qt.ApplicationModal)
+        dlg.setFixedSize(320, 520)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        # BATCH SIZE
+        batch_label = QtWidgets.QLabel("Images Converted At Once:")
+        self.batch_spin = QtWidgets.QSpinBox()
+        self.batch_spin.setRange(1, 64)
+        self.batch_spin.setValue(int(self.userSettings.get("batch_size", 6)))
+        layout.addWidget(batch_label)
+        layout.addWidget(self.batch_spin)
+
+        # Patterns label
+        pattern_label = QtWidgets.QLabel("Single-String Suffix Patterns:")
+        layout.addWidget(pattern_label)
+
+        # 4 QLineEdits for the single-string patterns
+        self.raw_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("raw", "_raw"))
+        self.lin_srgb_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("lin_srgb", "_lin_srgb"))
+        self.acescg_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("acescg", "_acescg"))
+        self.srgb_texture_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("srgb_texture", "_srgb_texture"))
+
+        # Add them with labels
+        layout.addWidget(QtWidgets.QLabel("raw pattern:"))
+        layout.addWidget(self.raw_line)
+        layout.addWidget(QtWidgets.QLabel("lin_srgb pattern:"))
+        layout.addWidget(self.lin_srgb_line)
+        layout.addWidget(QtWidgets.QLabel("acescg pattern:"))
+        layout.addWidget(self.acescg_line)
+        layout.addWidget(QtWidgets.QLabel("srgb_texture pattern:"))
+        layout.addWidget(self.srgb_texture_line)
+
+        # Now custom patterns label
+        custom_pattern_label = QtWidgets.QLabel("Custom Name Substrings (comma-separated):")
+        layout.addWidget(custom_pattern_label)
+
+        # Convert existing lists into comma-separated strings
+        def list_to_str(lst):
+            return ", ".join(lst) if lst else ""
+
+        # 4 QLineEdits for the multi-substring custom patterns
+        cpatterns = self.userSettings.get("custom_patterns", {})
+        self.raw_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("raw", [])))
+        self.lin_srgb_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("lin_srgb", [])))
+        self.acescg_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("acescg", [])))
+        self.srgb_texture_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("srgb_texture", [])))
+
+        # Add them with labels
+        layout.addWidget(QtWidgets.QLabel("raw:"))
+        layout.addWidget(self.raw_custom_line)
+        layout.addWidget(QtWidgets.QLabel("lin_srgb:"))
+        layout.addWidget(self.lin_srgb_custom_line)
+        layout.addWidget(QtWidgets.QLabel("acescg:"))
+        layout.addWidget(self.acescg_custom_line)
+        layout.addWidget(QtWidgets.QLabel("srgb_texture:"))
+        layout.addWidget(self.srgb_texture_custom_line)
+
+        # Buttons
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_ok = QtWidgets.QPushButton("OK")
+        btn_ok.clicked.connect(lambda: self.apply_settings(dlg))
+        btn_cancel = QtWidgets.QPushButton("Cancel")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        dlg.exec_()  # modal
+
+    def apply_settings(self, dlg):
+        """
+        Saves user input from the settings dialog into self.userSettings,
+        writes to JSON, and closes the dialog.
+        """
+        # 1) batch_size
+        self.userSettings["batch_size"] = self.batch_spin.value()
+
+        # 2) Single-string suffix patterns
+        self.userSettings["patterns"]["raw"] = self.raw_line.text()
+        self.userSettings["patterns"]["lin_srgb"] = self.lin_srgb_line.text()
+        self.userSettings["patterns"]["acescg"] = self.acescg_line.text()
+        self.userSettings["patterns"]["srgb_texture"] = self.srgb_texture_line.text()
+
+        # 3) Custom multi-substring patterns (split on commas, strip whitespace)
+        def parse_list_from_line(lineedit):
+            text = lineedit.text().strip()
+            if not text:
+                return []
+            return [x.strip() for x in text.split(",") if x.strip()]
+
+        raw_list = parse_list_from_line(self.raw_custom_line)
+        lin_list = parse_list_from_line(self.lin_srgb_custom_line)
+        acescg_list = parse_list_from_line(self.acescg_custom_line)
+        srgb_list = parse_list_from_line(self.srgb_texture_custom_line)
+
+        if "custom_patterns" not in self.userSettings:
+            self.userSettings["custom_patterns"] = {}
+
+        self.userSettings["custom_patterns"]["raw"] = raw_list
+        self.userSettings["custom_patterns"]["lin_srgb"] = lin_list
+        self.userSettings["custom_patterns"]["acescg"] = acescg_list
+        self.userSettings["custom_patterns"]["srgb_texture"] = srgb_list
+
+        # Write to JSON
+        self.save_user_settings()
+
+        # Close dialog
+        dlg.accept()
+        self.log("Settings updated.")
+
+    # ---------- Worker creation changed to pass userSettings ----------
+
     # DRAG & DROP
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -588,41 +765,56 @@ class TxConverterUI(QtWidgets.QDialog):
 
     def determine_color_space(self, filename, extension, tif_srgb):
         """
-        Determine the color space based on specific suffixes and patterns in the base filename,
-        or by file extension if no suffix is present...
-
-        New additions:
-        - We added more "raw" keywords (SPCR, BMP, BUMP, HIGHT, DISP, ROUGH, EMM, EMISSION, SPEC, NORM, NORMAL)
-            to the raw data pattern.
-        - 'RGB.exr' or any .exr remains lin_srgb if not otherwise tagged.
-        - If no recognized suffix or pattern is found, we default to srgb_texture.
+        Determine the color space based on specific suffixes/patterns
+        in the base filename, plus extension-based rules if no match.
+        Also merges user-defined custom patterns on top of the script's
+        existing default detection.
         """
+
+        # 1) Load your user-defined "suffix" patterns (the original single-string patterns):
+        p_raw = self.userSettings["patterns"].get("raw", "_raw")
+        p_lin_srgb = self.userSettings["patterns"].get("lin_srgb", "_lin_srgb")
+        p_acescg = self.userSettings["patterns"].get("acescg", "_acescg")
+        p_srgb_texture = self.userSettings["patterns"].get("srgb_texture", "_srgb_texture")
+
+        # 2) Also load any *custom name substrings* the user wants for each color space:
+        custom_raw = self.userSettings.get("custom_patterns", {}).get("raw", [])
+        custom_lin = self.userSettings.get("custom_patterns", {}).get("lin_srgb", [])
+        custom_acescg = self.userSettings.get("custom_patterns", {}).get("acescg", [])
+        custom_srgb_tex = self.userSettings.get("custom_patterns", {}).get("srgb_texture", [])
+
+        # We'll combine them with the original suffix so each color space
+        # check can pick up either the built-in or the user’s extra terms.
+        # (We lower() them during the matching stage below.)
+        raw_list = [p_raw.lower()] + [s.lower() for s in custom_raw]
+        lin_list = [p_lin_srgb.lower()] + [s.lower() for s in custom_lin]
+        acescg_list = [p_acescg.lower()] + [s.lower() for s in custom_acescg]
+        srgb_tex_list = [p_srgb_texture.lower()] + [s.lower() for s in custom_srgb_tex]
 
         base_name = os.path.splitext(os.path.basename(filename))[0]
         base_lower = base_name.lower()
 
-        # 1) If we see "_acescg", it's color space "acescg" (no transform)
-        if "_acescg" in base_lower:
-            new_name = re.sub(r'(\.[^.]+)$', '_acescg\\1', filename)
+        # -- 1) If any user/built-in “acescg” substring is in the name => color_space = acescg
+        if any(sub in base_lower for sub in acescg_list):
+            new_name = re.sub(r'(\.[^.]+)$', f"{p_acescg}\\1", filename)
             return 'acescg', '', new_name
 
-        # 2) If we see "_raw", it's raw data
-        if "_raw" in base_lower:
-            new_name = re.sub(r'(\.[^.]+)$', '_raw\\1', filename)
+        # -- 2) If any user/built-in “raw” substring is in the name => color_space = raw
+        if any(sub in base_lower for sub in raw_list):
+            new_name = re.sub(r'(\.[^.]+)$', f"{p_raw}\\1", filename)
             return 'raw', '-d float', new_name
 
-        # 3) If we see "_srgb_texture", it's srgb_texture
-        elif "_srgb_texture" in base_lower:
-            new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
+        # -- 3) If any user/built-in “srgb_texture” substring is in the name => srgb_texture
+        if any(sub in base_lower for sub in srgb_tex_list):
+            new_name = re.sub(r'(\.[^.]+)$', f"{p_srgb_texture}\\1", filename)
             return 'srgb_texture', '', new_name
 
-        # 4) If we see "_lin_srgb", it's lin_srgb
-        elif "_lin_srgb" in base_lower:
-            new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
+        # -- 4) If any user/built-in “lin_srgb” substring is in the name => lin_srgb
+        if any(sub in base_lower for sub in lin_list):
+            new_name = re.sub(r'(\.[^.]+)$', f"{p_lin_srgb}\\1", filename)
             return 'lin_srgb', '', new_name
 
-        # 5) "Raw" data pattern expanded with user-requested tokens:
-        #    spcr, bmp, bump, hight, disp, rough, emm, emission, spec, norm, normal
+        # -- 5) Next, check your big RAW_DATA_PATTERN for known raw data names
         RAW_DATA_PATTERN = (
             r'_depth|_disp|_displacement|_zdisp|_normal|_nrm|_norm|_n(?![a-z])|_mask'
             r'|_rough|_metal|_gloss|_spec|_ao|_cavity|_bump|_height|_opacity'
@@ -630,26 +822,27 @@ class TxConverterUI(QtWidgets.QDialog):
             r'|spcr|bmp|bump|hight|disp|rough|emm|emission|spec|norm|normal'
         )
         if re.search(RAW_DATA_PATTERN, base_lower):
-            new_name = re.sub(r'(\.[^.]+)$', '_raw\\1', filename)
+            new_name = re.sub(r'(\.[^.]+)$', f"{p_raw}\\1", filename)
             return 'raw', '-d float', new_name
 
-        # 6) If extension == .exr => lin_srgb
+        # -- 6) If extension == .exr => default to lin_srgb
         if extension == '.exr':
-            new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
+            new_name = re.sub(r'(\.[^.]+)$', f"{p_lin_srgb}\\1", filename)
             return 'lin_srgb', '', new_name
 
-        # 7) If extension in .tif/.tiff => either srgb_texture or lin_srgb depending on user checkbox
-        elif extension in ['.tif', '.tiff']:
+        # -- 7) If extension in TIF => either srgb_texture or lin_srgb based on user checkbox
+        if extension in ['.tif', '.tiff']:
             if tif_srgb:
-                new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
+                new_name = re.sub(r'(\.[^.]+)$', f"{p_srgb_texture}\\1", filename)
                 return 'srgb_texture', '', new_name
             else:
-                new_name = re.sub(r'(\.[^.]+)$', '_lin_srgb\\1', filename)
+                new_name = re.sub(r'(\.[^.]+)$', f"{p_lin_srgb}\\1", filename)
                 return 'lin_srgb', '', new_name
 
-        # 8) Fallback => srgb_texture
-        new_name = re.sub(r'(\.[^.]+)$', '_srgb_texture\\1', filename)
+        # -- 8) Fallback => srgb_texture
+        new_name = re.sub(r'(\.[^.]+)$', f"{p_srgb_texture}\\1", filename)
         return 'srgb_texture', '', new_name
+
 
 
     def rename_files(self, folder_path, add_suffix=False, recurse=True):
@@ -813,7 +1006,8 @@ class TxConverterUI(QtWidgets.QDialog):
             use_compression,
             use_renderman,
             hdri_mode=hdri_mode,
-            use_renderman_bumprough=use_renderman_bumprough
+            use_renderman_bumprough=use_renderman_bumprough,
+            userSettings=self.userSettings  # NEW: pass the loaded settings
         )
         self.worker.moveToThread(self.worker_thread)
         self.worker.logSignal.connect(self.appendLog)

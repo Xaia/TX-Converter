@@ -1,0 +1,15 @@
+{
+    "batch_size": 6,
+    "patterns": {
+        "raw": "_raw",
+        "lin_srgb": "_lin_srgb",
+        "acescg": "_acescg",
+        "srgb_texture": "_srgb_texture"
+    },
+    "custom_patterns": {
+        "raw": [],
+        "acescg": [],
+        "lin_srgb": [],
+        "srgb_texture": []
+    }
+}
