@@ -12,6 +12,18 @@ try:
 except ImportError:
     from shiboken6 import wrapInstance
 
+def get_user_settings_path():
+    """
+    Returns a path like:
+    - Windows:  C:/Users/<You>/AppData/Roaming/TxConverter/txconverter_settings.json
+    - Other OS: /home/<You>/TxConverter/txconverter_settings.json
+    """
+    appdata = os.environ.get('APPDATA')  # Typically Windows
+    if not appdata:
+        appdata = os.path.expanduser("~")
+    settings_folder = os.path.join(appdata, "TxConverter")
+    os.makedirs(settings_folder, exist_ok=True)
+    return os.path.join(settings_folder, "txconverter_settings.json")
 
 # -----------------------------------------------------------
 # Helper: Detect which ACES version the OCIO file is
@@ -490,12 +502,7 @@ class TxConverterUI(QtWidgets.QDialog):
 
         self.log("TX Converter UI initialized.")
 
-    # ---------- New JSON-based persistent settings ------------
     def load_user_settings(self):
-        """
-        Load user settings from 'txconverter_settings.json' if it exists,
-        else return a default dictionary.
-        """
         default = {
             "batch_size": 6,
             "patterns": {
@@ -503,9 +510,16 @@ class TxConverterUI(QtWidgets.QDialog):
                 "lin_srgb": "_lin_srgb",
                 "acescg": "_acescg",
                 "srgb_texture": "_srgb_texture"
+            },
+            "custom_patterns": {
+                "raw": [],
+                "lin_srgb": [],
+                "acescg": [],
+                "srgb_texture": []
             }
         }
-        settings_path = os.path.join(os.path.dirname(__file__), "txconverter_settings.json")
+
+        settings_path = get_user_settings_path()
         if os.path.isfile(settings_path):
             try:
                 with open(settings_path, "r", encoding="utf-8") as f:
@@ -515,11 +529,9 @@ class TxConverterUI(QtWidgets.QDialog):
                 return default
         return default
 
+
     def save_user_settings(self):
-        """
-        Save user settings to 'txconverter_settings.json'.
-        """
-        settings_path = os.path.join(os.path.dirname(__file__), "txconverter_settings.json")
+        settings_path = get_user_settings_path()
         try:
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(self.userSettings, f, indent=4)
