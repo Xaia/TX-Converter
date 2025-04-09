@@ -16,6 +16,7 @@ Features
  - Texture Color space preview
  - Custom settings
  - Custom patterns
+ - Added an Icon
 
  How to compile:
  Pyside 6 is required
@@ -46,7 +47,8 @@ Env Vars
  set OCIO = path/to/config.ocio
  
 
-![image](https://github.com/user-attachments/assets/393fe5ae-7a22-4060-be49-3e0bb66e5c0c)
+![image](https://github.com/user-attachments/assets/6a6834b0-7146-4a19-9b8c-e77cc33164d8)
+
 
 
 
