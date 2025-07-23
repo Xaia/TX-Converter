@@ -1,3 +1,5 @@
+# txconverter 2.0 start #
+
 import os
 import re
 import sys
@@ -76,21 +78,31 @@ class TextureWorker(QtCore.QObject):
         hdri_mode=False,
         parent=None,
         use_renderman_bumprough=False,
-        userSettings=None  # NEW: pass userSettings dict
+        userSettings=None,
+        use_houdini_rat=False
     ):
         super(TextureWorker, self).__init__(parent)
-        self.textures = textures
-        self.rename_to_acescg = rename_to_acescg
-        self.add_suffix_selected = add_suffix_selected
-        self.use_compression = use_compression
-        self.use_renderman = use_renderman
-        self.hdri_mode = hdri_mode
-        self.use_renderman_bumprough = use_renderman_bumprough
-        # New: read batch_size from userSettings, or default to 6
-        if userSettings and "batch_size" in userSettings:
-            self.batch_size = int(userSettings["batch_size"])
-        else:
-            self.batch_size = 6
+        self.textures                 = textures
+        self.rename_to_acescg         = rename_to_acescg
+        self.add_suffix_selected      = add_suffix_selected
+        self.use_compression          = use_compression
+        self.use_renderman            = use_renderman
+        self.hdri_mode                = hdri_mode
+        self.use_renderman_bumprough  = use_renderman_bumprough
+        self.use_houdini_rat          = use_houdini_rat
+
+        self.userSettings   = userSettings or {}
+        self.env_var_names  = self.userSettings.get("env_var_names", {
+            "imaketx":  "IMAKETX_PATH",
+            "arnold":   "MAKETX_PATH",
+            "renderman":"RMANTREE",
+            "ocio":     "OCIO",
+            "hfs":      "HFS"
+        })
+
+        # batch size
+        self.batch_size = int(self.userSettings.get("batch_size", 6))
+
 
     def run(self):
         total = len(self.textures)
@@ -117,50 +129,64 @@ class TextureWorker(QtCore.QObject):
     def convert_texture(self, texture, color_space, additional_options):
         self.logSignal.emit(f"Starting conversion for {os.path.basename(texture)}...")
 
-        # environment
-        arnold_path = os.environ.get("MAKETX_PATH", "maketx")
-        color_config = os.environ.get("OCIO", "")
-        renderman_path = os.environ.get("RMANTREE", "")
-        txmake_path = os.path.join(renderman_path, "bin", "txmake") if renderman_path else None
+        # ── resolve env-var names set by the UI ──────────────────────────
+        n = self.env_var_names
+        imaketx_var  = n.get("imaketx",   "IMAKETX_PATH")
+        arnold_var   = n.get("arnold",    "MAKETX_PATH")
+        rman_var     = n.get("renderman", "RMANTREE")
+        ocio_var     = n.get("ocio",      "OCIO")
+        hfs_var      = n.get("hfs",       "HFS")
 
-        # ACES version
+        imaketx_path = (
+            os.environ.get(imaketx_var) or
+            (os.path.join(os.environ.get(hfs_var, ""), "bin", "imaketx")
+                if os.environ.get(hfs_var) else None) or
+            "imaketx"
+        )
+        arnold_path    = os.environ.get(arnold_var, "maketx")
+        color_config   = os.environ.get(ocio_var, "")
+        renderman_root = os.environ.get(rman_var, "")
+        txmake_path    = (os.path.join(renderman_root, "bin", "txmake")
+                          if renderman_root else None)
+        # ----------------------------------------------------------------
+
         aces_version = detect_aces_version(color_config)
+        out_folder   = os.path.dirname(texture)
+        base_name, ext_with_dot = os.path.splitext(os.path.basename(texture))
+        ext = ext_with_dot.lower()[1:]
 
-        out_folder = os.path.dirname(texture)
-        base_name = os.path.splitext(os.path.basename(texture))[0]
-        ext = os.path.splitext(texture)[1].lower()[1:]
-
-        if ext in ["tex", "tx", "b2r"]:
+        # skip extensions we've already produced
+        if ext in ["tex", "tx", "b2r", "rat"]:
             self.logSignal.emit(f"Skipping already-processed file: {texture}")
             return
 
-        # rename_to_acescg => remove old suffix => add "_acescg"
+        # determine suffix
         if self.rename_to_acescg:
-            base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb|_acescg)$', '', base_name, flags=re.IGNORECASE)
+            base_name = re.sub(r'(_raw|_srgb_texture|_lin_srgb|_acescg)$',
+                               '', base_name, flags=re.IGNORECASE)
             suffix = "_acescg"
         else:
             if self.add_suffix_selected:
-                # If there's no recognized suffix, we add one
-                if not re.search(r'(_raw|_srgb_texture|_lin_srgb|_acescg)$', base_name, re.IGNORECASE):
+                if not re.search(r'(_raw|_srgb_texture|_lin_srgb|_acescg)$',
+                                 base_name, flags=re.IGNORECASE):
                     suffix = f"_{color_space}"
                 else:
                     suffix = ""
             else:
                 suffix = ""
 
-        # detect special
-        is_displacement = re.search(r'_disp|_displacement|_zdisp', base_name, re.IGNORECASE)
-        is_bump = re.search(r'_bump|_height', base_name, re.IGNORECASE)
-        is_normal = re.search(r'_normal|_nrm|_norm(?=[^a-z])', base_name, re.IGNORECASE)
+        # detect special maps
+        is_displacement = re.search(r'_disp|_displacement|_zdisp',
+                                    base_name, re.IGNORECASE)
+        is_bump         = re.search(r'_bump|_height',
+                                    base_name, re.IGNORECASE)
+        is_normal       = re.search(r'_normal|_nrm|_norm(?=[^a-z])',
+                                    base_name, re.IGNORECASE)
 
-        # Decide bit depth
+        # choose bit depth
         if is_displacement:
             bit_depth = 'float'
         else:
-            # If HDRI is on and color_space != 'raw' => 32-bit float
-            # Also do the same if color_space == 'acescg'
-            # i.e. if color_space != 'raw', we produce float if hdri_mode is True
-            # (some users want float for ACEScg as well)
             if self.hdri_mode and color_space != 'raw':
                 bit_depth = 'float'
             else:
@@ -171,39 +197,75 @@ class TextureWorker(QtCore.QObject):
                 else:
                     bit_depth = 'uint16'
 
-        # RENDERMAN path
+        # -----------------------------------------------------------------
+        # Houdini .rat via imaketx
+        # -----------------------------------------------------------------
+        if self.use_houdini_rat:
+            out_file = os.path.join(out_folder, f"{base_name}{suffix}.rat")
+            rat_cmd  = [imaketx_path, "-v", "--format", "RAT"]
+
+            if color_space not in ["raw", "acescg"]:
+                if color_config:
+                    rat_cmd += ["--colormanagement", "ocio"]
+                    if color_space == "lin_srgb":
+                        src = ("Linear Rec.709 (sRGB)"
+                               if aces_version == "1.3" else "lin_srgb")
+                    else:
+                        src = ("sRGB - Texture"
+                               if aces_version == "1.3" else "srgb_texture")
+                    rat_cmd += ["--colorconvert", src, "ACEScg"]
+                else:
+                    rat_cmd += ["--colormanagement", "builtin"]
+
+            rat_cmd += [texture, out_file]
+
+            self.logSignal.emit("imaketx command: " + " ".join(rat_cmd))
+            try:
+                res = subprocess.run(rat_cmd, shell=False,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+                if res.stdout:
+                    self.logSignal.emit("imaketx output: " +
+                                        res.stdout.decode().strip())
+                if res.stderr:
+                    self.logSignal.emit("imaketx errors: " +
+                                        res.stderr.decode().strip())
+                self.logSignal.emit(f"Converted to .rat: {texture} -> {out_file}")
+            except subprocess.CalledProcessError as e:
+                self.logSignal.emit(f"Failed to convert {texture} to .rat: {e}")
+            return
+
+        # -----------------------------------------------------------------
+        # RenderMan .tex via txmake
+        # -----------------------------------------------------------------
         if self.use_renderman and txmake_path:
             self.logSignal.emit(f"Converting {os.path.basename(texture)} to RenderMan .tex...")
-
             out_base = base_name + suffix
             tx_cmd = [txmake_path, "-format", "openexr"]
-
             if self.use_compression:
                 tx_cmd += ["-compression", "zip"]
-
             if bit_depth == 'half':
                 tx_cmd += ["-half"]
             elif bit_depth == 'float':
                 tx_cmd += ["-float"]
-
             tx_cmd += ["-resize", "round-", "-mode", "periodic"]
 
-            # if color_space is 'raw' or 'acescg' => no color transform
-            # else do -ocioconvert srgb_texture => ACEScg
             if color_space not in ["raw", "acescg"] and color_config:
                 if color_space == "lin_srgb":
                     if aces_version == "1.3":
-                        tx_cmd += ["-ocioconvert", "Linear Rec.709 (sRGB)", "ACEScg"]
+                        tx_cmd += ["-ocioconvert",
+                                   "Linear Rec.709 (sRGB)", "ACEScg"]
                     else:
-                        tx_cmd += ["-ocioconvert", "lin_srgb", "ACES - ACEScg"]
+                        tx_cmd += ["-ocioconvert", "lin_srgb",
+                                   "ACES - ACEScg"]
                 elif color_space == "srgb_texture":
                     if aces_version == "1.3":
-                        tx_cmd += ["-ocioconvert", "sRGB - Texture", "ACEScg"]
+                        tx_cmd += ["-ocioconvert",
+                                   "sRGB - Texture", "ACEScg"]
                     else:
-                        tx_cmd += ["-ocioconvert", "srgb_texture", "ACES - ACEScg"]
-                # else raw or acescg => no color transform
+                        tx_cmd += ["-ocioconvert", "srgb_texture",
+                                   "ACES - ACEScg"]
 
-            # bump -> b2r
             if self.use_renderman_bumprough and (is_bump or is_normal):
                 out_ext = ".b2r"
                 out_file = os.path.join(out_folder, out_base + out_ext)
@@ -216,13 +278,15 @@ class TextureWorker(QtCore.QObject):
                 out_file = os.path.join(out_folder, out_base + out_ext)
 
             tx_cmd += [texture, out_file]
-
             self.logSignal.emit("txmake command: " + " ".join(tx_cmd))
             try:
-                result = subprocess.run(tx_cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                result = subprocess.run(tx_cmd, shell=False,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
                 out_msg = result.stdout.decode('utf-8').strip()
                 err_msg = result.stderr.decode('utf-8').strip()
-                self.logSignal.emit("txmake output: " + out_msg)
+                if out_msg:
+                    self.logSignal.emit("txmake output: " + out_msg)
                 if err_msg:
                     self.logSignal.emit("txmake errors: " + err_msg)
                 self.logSignal.emit(f"Converted to {out_ext}: {texture} -> {out_file}")
@@ -230,45 +294,54 @@ class TextureWorker(QtCore.QObject):
                 self.logSignal.emit(f"Failed to convert {texture} to .tex: {e}")
             return
 
-        # Arnold path
+        # -----------------------------------------------------------------
+        # Arnold .tx via maketx
+        # -----------------------------------------------------------------
         arnold_out = os.path.join(out_folder, f"{base_name}{suffix}.tx")
         comp_flag = []
         if self.use_compression and not is_displacement:
             comp_flag = ["--compression", "dwaa"]
 
         cmd = [
-            arnold_path,
-            "-v",
+            arnold_path, "-v",
             "-o", arnold_out,
             "-u",
             "--format", "exr",
             "-d", bit_depth
         ] + comp_flag + ["--oiio", texture]
 
-        # if color_space is not raw/acescg => do color convert
         if color_space not in ["raw", "acescg"] and color_config:
             cmd += ["--colorconfig", color_config]
             if color_space == "lin_srgb":
                 if aces_version == "1.3":
-                    cmd += ["--colorconvert", "Linear Rec.709 (sRGB)", "ACEScg"]
+                    cmd += ["--colorconvert",
+                            "Linear Rec.709 (sRGB)", "ACEScg"]
                 else:
-                    cmd += ["--colorconvert", "lin_srgb", "ACES - ACEScg"]
+                    cmd += ["--colorconvert", "lin_srgb",
+                            "ACES - ACEScg"]
             elif color_space == "srgb_texture":
                 if aces_version == "1.3":
-                    cmd += ["--colorconvert", "sRGB - Texture", "ACEScg"]
+                    cmd += ["--colorconvert",
+                            "sRGB - Texture", "ACEScg"]
                 else:
-                    cmd += ["--colorconvert", "srgb_texture", "ACES - ACEScg"]
-            # raw / acescg => no colorconvert
+                    cmd += ["--colorconvert", "srgb_texture",
+                            "ACES - ACEScg"]
 
-        self.logSignal.emit("Converting {} to Arnold .tx...".format(os.path.basename(texture)))
+        self.logSignal.emit(f"Converting {os.path.basename(texture)} to Arnold .tx...")
         try:
-            result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.logSignal.emit("maketx output: " + result.stdout.decode('utf-8').strip())
+            result = subprocess.run(cmd, shell=True,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            if result.stdout:
+                self.logSignal.emit("maketx output: " +
+                                    result.stdout.decode('utf-8').strip())
             if result.stderr:
-                self.logSignal.emit("maketx errors: " + result.stderr.decode('utf-8').strip())
+                self.logSignal.emit("maketx errors: " +
+                                    result.stderr.decode('utf-8').strip())
             self.logSignal.emit(f"Converted: {texture} -> {arnold_out}")
         except subprocess.CalledProcessError as e:
             self.logSignal.emit(f"Failed to convert {texture} to .tx: {e}")
+
 
 
 # -----------------------------------------------------------
@@ -277,14 +350,21 @@ class TextureWorker(QtCore.QObject):
 class TxConverterUI(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(TxConverterUI, self).__init__(parent)
-        self.setWindowTitle("TX Converter")
+        self.setWindowTitle("TX Converter v1.0.5")
         self.setGeometry(100, 100, 600, 700)
         self.setMinimumSize(400, 900)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setWindowOpacity(1.0)
         self.setStyleSheet("background-color: #2D2D2D;")
-                # NEW: Load user settings from JSON
+        
+        
+        # ─── Load settings FIRST ──────────────────────────────
         self.userSettings = self.load_user_settings()
+
+        # ─── Apply any value-overrides to the current process ─
+        for var_name, override_val in self.userSettings.get("env_var_overrides", {}).items():
+            if override_val:
+                os.environ[var_name] = override_val
 
         self.worker = None
         self.worker_thread = None
@@ -445,6 +525,13 @@ class TxConverterUI(QtWidgets.QDialog):
         self.renderman_checkbox.setStyleSheet(f"color: {self.COLORS['text']};")
         self.renderman_checkbox.setChecked(False)
         content_layout.addWidget(self.renderman_checkbox)
+        
+        # NEW – Houdini .rat checkbox
+        self.houdini_rat_checkbox = QtWidgets.QCheckBox("Convert to Houdini .rat")
+        self.houdini_rat_checkbox.setStyleSheet(f"color: {self.COLORS['text']};")
+        self.houdini_rat_checkbox.setChecked(False)
+        content_layout.addWidget(self.houdini_rat_checkbox)
+        # --------------------------------------
 
         self.rename_to_acescg_checkbox = QtWidgets.QCheckBox("Rename to ACEScg Color Space")
         self.rename_to_acescg_checkbox.setStyleSheet(f"color: {self.COLORS['text']};")
@@ -501,8 +588,13 @@ class TxConverterUI(QtWidgets.QDialog):
         container_layout.addWidget(self.scroll_area)
 
         self.log("TX Converter UI initialized.")
+        self.log_env_status() 
 
     def load_user_settings(self):
+        """
+        Read persistent JSON (if any), merge with defaults,
+        and return the result as a dict.
+        """
         default = {
             "batch_size": 6,
             "patterns": {
@@ -516,6 +608,22 @@ class TxConverterUI(QtWidgets.QDialog):
                 "lin_srgb": [],
                 "acescg": [],
                 "srgb_texture": []
+            },
+            # default logical-role → env-var-NAME mapping
+            "env_var_names": {
+                "imaketx":  "IMAKETX_PATH",
+                "arnold":   "MAKETX_PATH",
+                "renderman":"RMANTREE",
+                "ocio":     "OCIO",
+                "hfs":      "HFS"
+            },
+            # optional override VALUES keyed by the var-name itself
+            "env_var_overrides": {
+                "IMAKETX_PATH": "",
+                "MAKETX_PATH":  "",
+                "RMANTREE":     "",
+                "OCIO":         "",
+                "HFS":          ""
             }
         }
 
@@ -523,11 +631,22 @@ class TxConverterUI(QtWidgets.QDialog):
         if os.path.isfile(settings_path):
             try:
                 with open(settings_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return data
-            except:
-                return default
-        return default
+                    user = json.load(f)
+            except Exception:
+                user = {}
+        else:
+            user = {}
+
+        # recursive merge
+        def merge(dst, src):
+            for k, v in src.items():
+                if isinstance(v, dict):
+                    dst[k] = merge(dst.get(k, {}), v)
+                else:
+                    dst.setdefault(k, v)
+            return dst
+
+        return merge(user, default)
 
 
     def save_user_settings(self):
@@ -540,124 +659,116 @@ class TxConverterUI(QtWidgets.QDialog):
 
     # ------------------ open_settings_dialog ------------------
     def open_settings_dialog(self):
-        """
-        Opens a QDialog so the user can:
-        - Change batch_size
-        - Change the single-string color space suffix patterns
-        - Enter multiple custom substrings (comma-separated) for each color space
-        """
+        """Settings dialog: batch size, suffixes, substrings, env-var NAMES."""
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("Settings")
         dlg.setWindowModality(QtCore.Qt.ApplicationModal)
-        dlg.setFixedSize(320, 520)
+        dlg.setFixedSize(380, 720)
 
-        layout = QtWidgets.QVBoxLayout(dlg)
+        lay = QtWidgets.QVBoxLayout(dlg)
 
-        # BATCH SIZE
-        batch_label = QtWidgets.QLabel("Images Converted At Once:")
+        # batch size
+        lay.addWidget(QtWidgets.QLabel("Images Converted At Once:"))
         self.batch_spin = QtWidgets.QSpinBox()
         self.batch_spin.setRange(1, 64)
         self.batch_spin.setValue(int(self.userSettings.get("batch_size", 6)))
-        layout.addWidget(batch_label)
-        layout.addWidget(self.batch_spin)
+        lay.addWidget(self.batch_spin)
 
-        # Patterns label
-        pattern_label = QtWidgets.QLabel("Single-String Suffix Patterns:")
-        layout.addWidget(pattern_label)
+        # hard suffixes
+        lay.addWidget(QtWidgets.QLabel("Single-String Suffix Patterns:"))
+        self.raw_line   = QtWidgets.QLineEdit(self.userSettings["patterns"]["raw"])
+        self.lin_line   = QtWidgets.QLineEdit(self.userSettings["patterns"]["lin_srgb"])
+        self.acg_line   = QtWidgets.QLineEdit(self.userSettings["patterns"]["acescg"])
+        self.srgb_line  = QtWidgets.QLineEdit(self.userSettings["patterns"]["srgb_texture"])
+        for lbl, w in [("raw", self.raw_line), ("lin_srgb", self.lin_line),
+                       ("acescg", self.acg_line), ("srgb_texture", self.srgb_line)]:
+            lay.addWidget(QtWidgets.QLabel(f"{lbl}:")); lay.addWidget(w)
 
-        # 4 QLineEdits for the single-string patterns
-        self.raw_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("raw", "_raw"))
-        self.lin_srgb_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("lin_srgb", "_lin_srgb"))
-        self.acescg_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("acescg", "_acescg"))
-        self.srgb_texture_line = QtWidgets.QLineEdit(self.userSettings["patterns"].get("srgb_texture", "_srgb_texture"))
+        # custom substrings
+        lay.addWidget(QtWidgets.QLabel("Custom Name Substrings (comma-separated):"))
+        cp = self.userSettings["custom_patterns"]
+        def to_str(key): return ", ".join(cp.get(key, []))
+        self.raw_cust  = QtWidgets.QLineEdit(to_str("raw"))
+        self.lin_cust  = QtWidgets.QLineEdit(to_str("lin_srgb"))
+        self.acg_cust  = QtWidgets.QLineEdit(to_str("acescg"))
+        self.srgb_cust = QtWidgets.QLineEdit(to_str("srgb_texture"))
+        for lbl, w in [("raw", self.raw_cust), ("lin_srgb", self.lin_cust),
+                       ("acescg", self.acg_cust), ("srgb_texture", self.srgb_cust)]:
+            lay.addWidget(QtWidgets.QLabel(f"{lbl}:")); lay.addWidget(w)
 
-        # Add them with labels
-        layout.addWidget(QtWidgets.QLabel("raw pattern:"))
-        layout.addWidget(self.raw_line)
-        layout.addWidget(QtWidgets.QLabel("lin_srgb pattern:"))
-        layout.addWidget(self.lin_srgb_line)
-        layout.addWidget(QtWidgets.QLabel("acescg pattern:"))
-        layout.addWidget(self.acescg_line)
-        layout.addWidget(QtWidgets.QLabel("srgb_texture pattern:"))
-        layout.addWidget(self.srgb_texture_line)
+        # env-var NAMES only (no value column)
+        lay.addWidget(QtWidgets.QLabel(
+            "Environment-Variable Names (edit if your studio uses different ones):",
+            styleSheet="font-weight:bold;"))
+        roles = ["imaketx", "arnold", "renderman", "ocio", "hfs"]
+        names = self.userSettings["env_var_names"]
+        self.env_name_edit = {}
+        grid = QtWidgets.QGridLayout(); grid.setColumnStretch(1, 1)
+        for r, role in enumerate(roles):
+            grid.addWidget(QtWidgets.QLabel(role.upper()), r, 0)
+            le = QtWidgets.QLineEdit(names.get(role, ""))
+            self.env_name_edit[role] = le
+            grid.addWidget(le, r, 1)
+        lay.addLayout(grid)
 
-        # Now custom patterns label
-        custom_pattern_label = QtWidgets.QLabel("Custom Name Substrings (comma-separated):")
-        layout.addWidget(custom_pattern_label)
+        # buttons
+        row = QtWidgets.QHBoxLayout()
+        ok  = QtWidgets.QPushButton("OK");  ok.clicked.connect(lambda: self.apply_settings(dlg))
+        cancel = QtWidgets.QPushButton("Cancel"); cancel.clicked.connect(dlg.reject)
+        row.addWidget(ok); row.addWidget(cancel); lay.addLayout(row)
 
-        # Convert existing lists into comma-separated strings
-        def list_to_str(lst):
-            return ", ".join(lst) if lst else ""
+        dlg.exec_()
 
-        # 4 QLineEdits for the multi-substring custom patterns
-        cpatterns = self.userSettings.get("custom_patterns", {})
-        self.raw_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("raw", [])))
-        self.lin_srgb_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("lin_srgb", [])))
-        self.acescg_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("acescg", [])))
-        self.srgb_texture_custom_line = QtWidgets.QLineEdit(list_to_str(cpatterns.get("srgb_texture", [])))
 
-        # Add them with labels
-        layout.addWidget(QtWidgets.QLabel("raw:"))
-        layout.addWidget(self.raw_custom_line)
-        layout.addWidget(QtWidgets.QLabel("lin_srgb:"))
-        layout.addWidget(self.lin_srgb_custom_line)
-        layout.addWidget(QtWidgets.QLabel("acescg:"))
-        layout.addWidget(self.acescg_custom_line)
-        layout.addWidget(QtWidgets.QLabel("srgb_texture:"))
-        layout.addWidget(self.srgb_texture_custom_line)
 
-        # Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
-        btn_ok = QtWidgets.QPushButton("OK")
-        btn_ok.clicked.connect(lambda: self.apply_settings(dlg))
-        btn_cancel = QtWidgets.QPushButton("Cancel")
-        btn_cancel.clicked.connect(dlg.reject)
-        btn_layout.addWidget(btn_ok)
-        btn_layout.addWidget(btn_cancel)
-        layout.addLayout(btn_layout)
-
-        dlg.exec_()  # modal
 
     def apply_settings(self, dlg):
-        """
-        Saves user input from the settings dialog into self.userSettings,
-        writes to JSON, and closes the dialog.
-        """
-        # 1) batch_size
+        """Commit dialog changes, save JSON, refresh log."""
         self.userSettings["batch_size"] = self.batch_spin.value()
 
-        # 2) Single-string suffix patterns
-        self.userSettings["patterns"]["raw"] = self.raw_line.text()
-        self.userSettings["patterns"]["lin_srgb"] = self.lin_srgb_line.text()
-        self.userSettings["patterns"]["acescg"] = self.acescg_line.text()
-        self.userSettings["patterns"]["srgb_texture"] = self.srgb_texture_line.text()
+        # suffixes
+        self.userSettings["patterns"]["raw"]          = self.raw_line.text()
+        self.userSettings["patterns"]["lin_srgb"]     = self.lin_line.text()
+        self.userSettings["patterns"]["acescg"]       = self.acg_line.text()
+        self.userSettings["patterns"]["srgb_texture"] = self.srgb_line.text()
 
-        # 3) Custom multi-substring patterns (split on commas, strip whitespace)
-        def parse_list_from_line(lineedit):
-            text = lineedit.text().strip()
-            if not text:
-                return []
-            return [x.strip() for x in text.split(",") if x.strip()]
+        # custom substrings
+        def split(le): return [x.strip() for x in le.text().split(",") if x.strip()]
+        self.userSettings["custom_patterns"]["raw"]          = split(self.raw_cust)
+        self.userSettings["custom_patterns"]["lin_srgb"]     = split(self.lin_cust)
+        self.userSettings["custom_patterns"]["acescg"]       = split(self.acg_cust)
+        self.userSettings["custom_patterns"]["srgb_texture"] = split(self.srgb_cust)
 
-        raw_list = parse_list_from_line(self.raw_custom_line)
-        lin_list = parse_list_from_line(self.lin_srgb_custom_line)
-        acescg_list = parse_list_from_line(self.acescg_custom_line)
-        srgb_list = parse_list_from_line(self.srgb_texture_custom_line)
+        # env-var names (just names, no values)
+        roles = ["imaketx", "arnold", "renderman", "ocio", "hfs"]
+        new_names = {}
+        for role in roles:
+            name_txt = self.env_name_edit[role].text().strip()
+            if name_txt:
+                new_names[role] = name_txt
+        self.userSettings["env_var_names"] = new_names
 
-        if "custom_patterns" not in self.userSettings:
-            self.userSettings["custom_patterns"] = {}
-
-        self.userSettings["custom_patterns"]["raw"] = raw_list
-        self.userSettings["custom_patterns"]["lin_srgb"] = lin_list
-        self.userSettings["custom_patterns"]["acescg"] = acescg_list
-        self.userSettings["custom_patterns"]["srgb_texture"] = srgb_list
-
-        # Write to JSON
         self.save_user_settings()
-
-        # Close dialog
+        self.log("Settings saved.")
+        self.log_env_status()
         dlg.accept()
-        self.log("Settings updated.")
+
+
+
+        
+    def log_env_status(self):
+        """List each logical role, the resolved env-var name, and whether it is set."""
+        roles = ["imaketx", "arnold", "renderman", "ocio", "hfs"]
+        names = self.userSettings.get("env_var_names", {})
+        self.log("── Environment Variables ──")
+        for role in roles:
+            var = names.get(role, "<undefined>")
+            val = os.environ.get(var)
+            dot = "🟢" if val else "🔴"
+            display = val if val else "<NOT SET>"
+            self.log(f"  {dot} {role.upper():10s} → {var} = {display}")
+        self.log("──────────────────────────")
+
 
     # ---------- Worker creation changed to pass userSettings ----------
 
@@ -1009,6 +1120,8 @@ class TxConverterUI(QtWidgets.QDialog):
         use_renderman = self.renderman_checkbox.isChecked()
         hdri_mode = self.hdri_checkbox.isChecked()
         use_renderman_bumprough = self.renderman_bumprough_checkbox.isChecked()
+        
+        use_houdini_rat = self.houdini_rat_checkbox.isChecked()  # NEW
 
         self.worker_thread = QtCore.QThread()
         self.worker = TextureWorker(
@@ -1019,7 +1132,8 @@ class TxConverterUI(QtWidgets.QDialog):
             use_renderman,
             hdri_mode=hdri_mode,
             use_renderman_bumprough=use_renderman_bumprough,
-            userSettings=self.userSettings  # NEW: pass the loaded settings
+            userSettings=self.userSettings, #NEW: pass the loaded settings
+            use_houdini_rat=use_houdini_rat           # NEW
         )
         self.worker.moveToThread(self.worker_thread)
         self.worker.logSignal.connect(self.appendLog)
@@ -1093,3 +1207,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# txconverter 2.0 end#
