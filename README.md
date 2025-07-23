@@ -17,6 +17,8 @@ Features:
  - Custom settings
  - Custom patterns
  - Added an Icon
+ - Added Houdini .RAT support
+ - Added Custom ENV VARS
 
  How to compile:
  Pyside 6 is required
