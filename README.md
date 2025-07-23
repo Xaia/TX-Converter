@@ -1,5 +1,5 @@
 # TX Converter
- Converts textures to arnold tx and renderman tex.
+ Converts textures to arnold tx renderman tex and karma rat.
  
 Features:
  - Convert entire folders and subfolders
