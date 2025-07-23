@@ -49,7 +49,8 @@ Env Vars
  set OCIO = path/to/config.ocio
  
 
-![image](https://github.com/user-attachments/assets/6a6834b0-7146-4a19-9b8c-e77cc33164d8)
+<img width="869" height="1407" alt="image" src="https://github.com/user-attachments/assets/996492d7-6d64-4301-82e1-66f2d5655e1a" />
+
 
 
 
