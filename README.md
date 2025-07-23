@@ -47,7 +47,12 @@ Env Vars
  set MAKETX_PATH = path/to/arnold/maketx.exe 
  
  set OCIO = path/to/config.ocio
- 
+
+ set IMAKETEX = path/to/houdini/imaketx.exe
+
+ set HFS = path/to/houdini/
+ <img width="694" height="692" alt="tx_icon2" src="https://github.com/user-attachments/assets/370c8642-d639-471e-b780-dfa9697952fa" />
+
 
 <img width="869" height="1407" alt="image" src="https://github.com/user-attachments/assets/996492d7-6d64-4301-82e1-66f2d5655e1a" />
 
