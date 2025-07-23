@@ -1,4 +1,4 @@
-# txconverter 2.0 start #
+# txconverter v1.0.5 start #
 
 import os
 import re
@@ -423,7 +423,7 @@ class TxConverterUI(QtWidgets.QDialog):
         title_bar_layout.setContentsMargins(16, 0, 8, 0)
         title_bar_layout.setSpacing(12)
 
-        title_label = QtWidgets.QLabel("TX CONVERTER")
+        title_label = QtWidgets.QLabel("TX CONVERTER v1.0.5 ")
         title_label.setStyleSheet(f"color: {self.COLORS['text']}; font-size: 14px; font-weight: bold;")
         title_bar_layout.addWidget(title_label)
         title_bar_layout.addStretch()
@@ -1208,4 +1208,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# txconverter 2.0 end#
+# txconverter v1.0.5 end#
