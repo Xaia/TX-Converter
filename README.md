@@ -1,7 +1,7 @@
 # TX Converter
  Converts textures to arnold tx and renderman tex.
  
-Features
+Features:
  - Convert entire folders and subfolders
  - Multithreaded conversion
  - Simultaneous Multi texture conversion
