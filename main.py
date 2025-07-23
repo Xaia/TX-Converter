@@ -352,7 +352,7 @@ class TxConverterUI(QtWidgets.QDialog):
         super(TxConverterUI, self).__init__(parent)
         self.setWindowTitle("TX Converter v1.0.5")
         self.setGeometry(100, 100, 600, 700)
-        self.setMinimumSize(400, 900)
+        self.setMinimumSize(400, 950)
         self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
         self.setWindowOpacity(1.0)
         self.setStyleSheet("background-color: #2D2D2D;")
