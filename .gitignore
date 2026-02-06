@@ -1,2 +1,8 @@
 .qodo
 main_v02.py
+
+# PyInstaller
+build/
+dist/
+*.spec
+.gitignore
