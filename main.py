@@ -588,7 +588,7 @@ class TxConverterUI(QtWidgets.QDialog):
         container_layout.addWidget(self.scroll_area)
 
         self.log("TX Converter UI initialized.")
-        self.log_env_status() 
+        QtCore.QTimer.singleShot(0, self.log_env_status)
 
     def load_user_settings(self):
         """
@@ -796,13 +796,8 @@ class TxConverterUI(QtWidgets.QDialog):
 
     @QtCore.Slot(str)
     def appendLog(self, message):
-        current = self.output_field.toHtml()
         safe_msg = message.replace("<", "&lt;").replace(">", "&gt;")
-        new_html = current + f"<div>{safe_msg}</div>"
-        self.output_field.setHtml(new_html)
-        self.output_field.verticalScrollBar().setValue(
-            self.output_field.verticalScrollBar().maximum()
-        )
+        self.output_field.append(safe_msg)
         print(message)
 
     @QtCore.Slot(int)
