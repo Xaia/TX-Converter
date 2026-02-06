@@ -1,5 +1,5 @@
 # TX Converter
- Converts textures to arnold tx and renderman tex.
+ Converts textures to arnold tx renderman tex and karma rat.
  
 Features:
  - Convert entire folders and subfolders
@@ -47,9 +47,15 @@ Env Vars
  set MAKETX_PATH = path/to/arnold/maketx.exe 
  
  set OCIO = path/to/config.ocio
- 
 
-![image](https://github.com/user-attachments/assets/6a6834b0-7146-4a19-9b8c-e77cc33164d8)
+ set IMAKETEX = path/to/houdini/imaketx.exe
+
+ set HFS = path/to/houdini/
+ <img width="694" height="692" alt="tx_icon2" src="https://github.com/user-attachments/assets/370c8642-d639-471e-b780-dfa9697952fa" />
+
+
+<img width="869" height="1407" alt="image" src="https://github.com/user-attachments/assets/996492d7-6d64-4301-82e1-66f2d5655e1a" />
+
 
 
 
